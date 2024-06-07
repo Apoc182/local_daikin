@@ -154,6 +154,8 @@ class LocalDaikin(ClimateEntity):
         self._target_temperature = None
         self._current_temperature = None
         self._current_humidity = None
+        self._runtime_today = None
+        self._energy_today = None
 
         self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.DRY, HVACMode.FAN_ONLY]
         self._attr_fan_modes = [
@@ -236,6 +238,8 @@ class LocalDaikin(ClimateEntity):
     def extra_state_attributes(self):
         return {
             "outside_temperature": self._outside_temperature,
+            "runtime_today": self._runtime_today,
+            "energy_today": self._energy_today
         }
 
 
@@ -318,7 +322,8 @@ class LocalDaikin(ClimateEntity):
         payload = {
             "requests": [
                 {"op": 2, "to": "/dsiot/edge/adr_0100.dgc_status?filter=pv,pt,md"},
-                {"op": 2, "to": "/dsiot/edge/adr_0200.dgc_status?filter=pv,pt,md"}
+                {"op": 2, "to": "/dsiot/edge/adr_0200.dgc_status?filter=pv,pt,md"},
+                {"op": 2, "to": "/dsiot/edge/adr_0100.i_power.week_power?filter=pv,pt,md"}
             ]
         }
 
@@ -333,4 +338,6 @@ class LocalDaikin(ClimateEntity):
         self._swing_mode = self.get_swing_state(data)
         is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
         self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
+        self._energy_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1]
+        self._runtime_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
         self.schedule_update_ha_state()
