@@ -1,5 +1,6 @@
 import logging
 import requests
+import aiohttp
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature
 from homeassistant.components.climate.const import (
     HVACMode,
@@ -9,9 +10,11 @@ from homeassistant.components.climate.const import (
     SWING_HORIZONTAL
 )
 from homeassistant.const import UnitOfTemperature
+from homeassistant.helpers.device_registry import format_mac
 from typing import Any
 from dataclasses import dataclass, field
 from enum import StrEnum
+
 
 
 # TODO make outside temp another sensor or something? Makes sense right?
@@ -140,7 +143,9 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     ip_address = config.get('ip_address')
     if ip_address is None:
         raise ValueError("IP address for Local Daikin is not set. Please provide 'ip_address' in the configuration.yaml.")
-    async_add_entities([LocalDaikin(ip_address)])
+    obj = LocalDaikin(ip_address)
+    await obj.initialize_unique_id(hass)
+    async_add_entities([obj])
 
 class LocalDaikin(ClimateEntity):
     def __init__(self, ip_address: str):
@@ -156,6 +161,7 @@ class LocalDaikin(ClimateEntity):
         self._current_humidity = None
         self._runtime_today = None
         self._energy_today = None
+        self._mac = None
 
         self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.DRY, HVACMode.FAN_ONLY]
         self._attr_fan_modes = [
@@ -192,6 +198,17 @@ class LocalDaikin(ClimateEntity):
             self.turn_on()
             self.update_attribute(DaikinRequest([attribute]).serialize())
 
+
+    async def initialize_unique_id(self, hass):
+        payload = {
+            "requests": [
+                {"op": 2, "to": "/dsiot/edge.adp_i"}
+            ]
+        }
+        response = await hass.async_add_executor_job(lambda: requests.post(self.url, json=payload))
+        response.raise_for_status()
+        data = response.json()
+        self._mac = format_mac(self.find_value_by_pn(data, "/dsiot/edge.adp_i", "adp_i", "mac"))
 
     @property
     def name(self):
@@ -242,6 +259,9 @@ class LocalDaikin(ClimateEntity):
             "energy_today": self._energy_today
         }
 
+    @property
+    def unique_id(self):
+        return self._mac
 
     @staticmethod
     def find_value_by_pn(data:dict, fr: str, *keys):
@@ -330,6 +350,8 @@ class LocalDaikin(ClimateEntity):
         response = requests.post(self.url, json=payload)
         response.raise_for_status()
         data = response.json()
+
+        _LOGGER.info(data)
         self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
         self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_03'))
         self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3003', 'p_0C'))
