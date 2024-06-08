@@ -139,12 +139,21 @@ class DaikinRequest:
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the air conditioner platform."""
-    ip_address = config.get('ip_address')
-    if ip_address is None:
+    ip_addresses = config.get('ip_address')
+
+    if ip_addresses is None:
         raise ValueError("IP address for Local Daikin is not set. Please provide 'ip_address' in the configuration.yaml.")
-    obj = LocalDaikin(ip_address)
-    await obj.initialize_unique_id(hass)
-    async_add_entities([obj])
+
+    if isinstance(ip_addresses, str):
+        ip_addresses = [ip_addresses]
+    
+    entities = []
+    for ip_address in ip_addresses:
+        obj = LocalDaikin(ip_address)
+        await obj.initialize_unique_id(hass)
+        entities.append(obj)
+        
+    async_add_entities(entities)
 
 class LocalDaikin(ClimateEntity):
     def __init__(self, ip_address: str):
@@ -163,6 +172,7 @@ class LocalDaikin(ClimateEntity):
         self._mac = None
         self._max_temp = 30 # may need some logic to set this based on the device ID
         self._min_temp = 10
+            
 
         self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.DRY, HVACMode.FAN_ONLY]
         self._attr_fan_modes = [
