@@ -1,6 +1,5 @@
 import logging
 import requests
-import aiohttp
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature
 from homeassistant.components.climate.const import (
     HVACMode,
