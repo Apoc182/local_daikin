@@ -268,7 +268,7 @@ class LocalDaikin(ClimateEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
-        return self._target_temperature
+        return self._target_temperature if self._hvac_mode != HVACMode.OFF else None
 
     @property
     def current_temperature(self):
