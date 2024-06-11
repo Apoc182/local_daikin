@@ -79,11 +79,21 @@ MODE_MAP = {
     "0500" : HVACMode.DRY
 }
 
+NO_TARGET_TEMPERATURE_MODES = (
+    HVACMode.OFF,
+    HVACMode.DRY,
+    HVACMode.FAN_ONLY
+)
+
+
+
 HVAC_TO_TEMP_HEX = {
     HVACMode.COOL : "p_02",
     HVACMode.HEAT : "p_03",
     HVACMode.AUTO : "p_1D"
 }
+
+
 
 REVERSE_MODE_MAP = {v: k for k, v in MODE_MAP.items()}
 REVERSE_FAN_MODE_MAP = {v: k for k, v in FAN_MODE_MAP.items()}
@@ -268,7 +278,7 @@ class LocalDaikin(ClimateEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
-        return self._target_temperature if self._hvac_mode != HVACMode.OFF else None
+        return self._target_temperature if self._hvac_mode not in NO_TARGET_TEMPERATURE_MODES else None
 
     @property
     def current_temperature(self):
@@ -312,10 +322,12 @@ class LocalDaikin(ClimateEntity):
 
     def set_temperature(self, temperature: float, **kwargs):
         _LOGGER.info("Temp change to " + str(temperature) + " requested.")
-        temperature_hex = format(int(temperature * 2), 'x')
         attr_name = HVAC_TO_TEMP_HEX.get(self.hvac_mode)
         if attr_name is None:
-            _LOGGER.info(f"Cannot set temperature in {self.hvac} mode.")
+            _LOGGER.error(f"Cannot set temperature in {self.hvac} mode.")
+            return
+
+        temperature_hex = format(int(temperature * 2), '02x') 
         temp_attr = DaikinAttribute(attr_name, temperature_hex, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
         self.update_attribute(DaikinRequest([temp_attr]).serialize())
 
@@ -376,7 +388,10 @@ class LocalDaikin(ClimateEntity):
 
         _LOGGER.info(data)
         self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
-        self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_03'))
+
+        name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
+        if name is not None:
+            self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
         
         # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
         # for this temperature is limited to integers. So the passed divisor is 1.
