@@ -7,10 +7,21 @@ To install this integration, use the Home Assistant Community Store (HACS).
 # Configuration
 After installation, add the integration using the IP address of your Daikin air conditioner:
 
-```
+```yaml
 climate:
   - platform: local_daikin
-    ip_address: 192.168.1.69
+    ip_address: X.X.X.Y
+```
+
+Alternatively, if you have mutliple appliances.
+
+```yaml
+climate:
+  - platform: local_daikin
+    ip_address:
+      - X.X.X.Y
+      - X.X.X.Z
+      ...
 ```
 
 # Compatibility
