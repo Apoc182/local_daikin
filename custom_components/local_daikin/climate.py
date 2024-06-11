@@ -306,8 +306,8 @@ class LocalDaikin(ClimateEntity):
 
 
     @staticmethod
-    def hex_to_temp(value: str) -> float:
-        return int(value[:2], 16) / 2
+    def hex_to_temp(value: str, divisor=2) -> float:
+        return int(value[:2], 16) / divisor
 
 
     def set_temperature(self, temperature: float, **kwargs):
@@ -377,7 +377,10 @@ class LocalDaikin(ClimateEntity):
         _LOGGER.info(data)
         self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
         self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_03'))
-        self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3003', 'p_0C'))
+        
+        # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
+        # for this temperature is limited to integers. So the passed divisor is 1.
+        self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
         self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", "p_0A")]
         self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
         self._swing_mode = self.get_swing_state(data)
