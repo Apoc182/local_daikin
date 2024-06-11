@@ -79,13 +79,6 @@ MODE_MAP = {
     "0500" : HVACMode.DRY
 }
 
-NO_TARGET_TEMPERATURE_MODES = (
-    HVACMode.OFF,
-    HVACMode.DRY,
-    HVACMode.FAN_ONLY
-)
-
-
 
 HVAC_TO_TEMP_HEX = {
     HVACMode.COOL : "p_02",
@@ -278,7 +271,7 @@ class LocalDaikin(ClimateEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
-        return self._target_temperature if self._hvac_mode not in NO_TARGET_TEMPERATURE_MODES else None
+        return self._target_temperature
 
     @property
     def current_temperature(self):
@@ -385,22 +378,29 @@ class LocalDaikin(ClimateEntity):
         response = requests.post(self.url, json=payload)
         response.raise_for_status()
         data = response.json()
-
         _LOGGER.info(data)
+
+        # Set the HVAC mode.
+        is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
+        self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
+
         self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
 
+        # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
         name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
         if name is not None:
             self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
+        else:
+            self._target_temperature = None
         
         # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
         # for this temperature is limited to integers. So the passed divisor is 1.
         self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
+
         self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", "p_0A")]
         self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
         self._swing_mode = self.get_swing_state(data)
-        is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
-        self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
+        
         self._energy_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1]
         self._runtime_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
         self.schedule_update_ha_state()
