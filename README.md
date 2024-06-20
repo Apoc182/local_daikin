@@ -25,7 +25,11 @@ climate:
 ```
 
 # Compatibility
-This integration has been tested and confirmed to work with the Daikin model FTXM46WVMA running firmware version 2.8.0. Compatibility with other models or firmware versions is not guaranteed.
+This integration has been tested and confirmed to work with the following Daikin models:
+  - FTKM20YVMA with firmware version 2.8.0.
+  -   - FTXM46WVMA with firmware version 2.8.0.
+
+Compatibility with other models or firmware versions is not guaranteed.
 
 # Feedback and Contributions
 This integration is a quick and dirty fix, and any suggestions for improvements or expansions are welcome. If you encounter issues or have ideas for enhancements, please open an issue in the GitHub repository for this project.
