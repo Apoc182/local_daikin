@@ -10,7 +10,7 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.const import UnitOfTemperature
 from homeassistant.helpers.device_registry import format_mac
-from typing import Any
+from typing import Any, List
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -41,6 +41,13 @@ class HAFanMode(StrEnum):
     FAN_LEVEL4 = "Level 4"
     FAN_LEVEL5 = "Level 5"
 
+
+
+TURN_OFF_SWING_AXIS = "000000"
+TURN_ON_SWING_AXIS = "0F0000"
+
+
+
 FAN_MODE_MAP = {
     HAFanMode.FAN_AUTO : "0A00",
     HAFanMode.FAN_QUIET : "0B00",
@@ -51,23 +58,21 @@ FAN_MODE_MAP = {
     HAFanMode.FAN_LEVEL5 : "0700"
 }
 
-SWING_MODE_MAP = {
-    SWING_OFF : [
-        DaikinAttribute("p_07", "000000", ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"),
-        DaikinAttribute("p_08", "000000", ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-    ],
-    SWING_HORIZONTAL : [
-        DaikinAttribute("p_07", "000000", ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"),
-        DaikinAttribute("p_08", "0F0000", ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-    ],
-    SWING_VERTICAL : [
-        DaikinAttribute("p_07", "0F0000", ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"),
-        DaikinAttribute("p_08", "000000", ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-    ], 
-    SWING_BOTH : [
-        DaikinAttribute("p_07", "0F0000", ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"),
-        DaikinAttribute("p_08", "0F0000", ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-    ]
+# Vertical, horizontal
+HVAC_MODE_TO_SWING_ATTR_NAMES = {
+    HVACMode.AUTO : ("p_20", "p_21"),
+    HVACMode.COOL : ("p_05", "p_06"),
+    HVACMode.HEAT : ("p_07", "p_08"),
+    HVACMode.FAN_ONLY : ("p_24", "p_25"),
+    HVACMode.DRY : ("p_22", "p_23")
+}
+
+HVAC_MODE_TO_FAN_SPEED_ATTR_NAME = {
+    HVACMode.AUTO : "p_26",
+    HVACMode.COOL : "p_09",
+    HVACMode.HEAT : "p_0A",
+    HVACMode.FAN_ONLY : "p_28",
+    # HVACMode.DRY : "dummy" There is no fan mode for dry. It's always automatic.
 }
 
 
@@ -153,6 +158,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     entities = []
     for ip_address in ip_addresses:
         obj = LocalDaikin(ip_address)
+        hass.async_add_executor_job(obj.update)
         await obj.initialize_unique_id(hass)
         entities.append(obj)
         
@@ -245,11 +251,30 @@ class LocalDaikin(ClimateEntity):
 
     def set_fan_mode(self, fan_mode: str):
         mode = FAN_MODE_MAP[fan_mode]
-        mode_attr = DaikinAttribute("p_0A", mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-        self.update_attribute(DaikinRequest([mode_attr]).serialize())
+        name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
+
+        # If in dry mode for example, you cannot set the fan speed. So we ignore anything we cant find in this map.
+        if name is not None:
+            mode_attr = DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
+            self.update_attribute(DaikinRequest([mode_attr]).serialize())
+        else:
+            self._fan_mode = HAFanMode.FAN_AUTO
 
     def set_swing_mode(self, swing_mode: str):
-        self.update_attribute(DaikinRequest(SWING_MODE_MAP[swing_mode]).serialize())
+        if self.hvac_mode == HVACMode.OFF:
+            return
+        vertical_axis_command = TURN_OFF_SWING_AXIS if swing_mode in (SWING_OFF, SWING_HORIZONTAL) else TURN_ON_SWING_AXIS
+        horizontal_axis_command = TURN_OFF_SWING_AXIS if swing_mode in (SWING_OFF, SWING_VERTICAL) else TURN_ON_SWING_AXIS
+        vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
+        self.update_attribute(
+            DaikinRequest(
+                [
+                    DaikinAttribute(horizontal_attr_name, horizontal_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"),
+                    DaikinAttribute(vertical_attr_name, vertical_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
+                ]
+            ).serialize()
+        )
+
 
     @property
     def temperature_unit(self):
@@ -346,10 +371,12 @@ class LocalDaikin(ClimateEntity):
         self._update_state(True)
 
     def get_swing_state(self, data: dict) -> str:
-        
+        if self.hvac_mode == HVACMode.OFF:
+            return
         # The number of zeros in the response seems strange. Don't have time to work out, so this should work
-        horizontal = "F" in self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", "p_08")
-        vertical = "F" in self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", "p_07")
+        vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
+        vertical = "F" in self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", vertical_attr_name)
+        horizontal = "F" in self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", horizontal_attr_name)
 
         if horizontal and vertical:
             return SWING_BOTH
@@ -397,7 +424,13 @@ class LocalDaikin(ClimateEntity):
         # for this temperature is limited to integers. So the passed divisor is 1.
         self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
 
-        self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", "p_0A")]
+        # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
+        fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
+        if fan_mode_key_name is not None:
+            self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])]
+        else:
+            self._fan_mode = HAFanMode.FAN_AUTO
+
         self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
         self._swing_mode = self.get_swing_state(data)
         
