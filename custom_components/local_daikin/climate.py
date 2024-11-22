@@ -371,8 +371,8 @@ class LocalDaikin(ClimateEntity):
         self._update_state(True)
 
     def get_swing_state(self, data: dict) -> str:
-        if self.hvac_mode == HVACMode.OFF:
-            return
+
+
         # The number of zeros in the response seems strange. Don't have time to work out, so this should work
         vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
         vertical = "F" in self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", vertical_attr_name)
@@ -432,7 +432,9 @@ class LocalDaikin(ClimateEntity):
             self._fan_mode = HAFanMode.FAN_AUTO
 
         self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
-        self._swing_mode = self.get_swing_state(data)
+
+        if not self.hvac_mode == HVACMode.OFF:
+            self._swing_mode = self.get_swing_state(data)
         
         self._energy_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1]
         self._runtime_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
