@@ -158,7 +158,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     entities = []
     for ip_address in ip_addresses:
         obj = LocalDaikin(ip_address)
-        hass.async_add_executor_job(obj.update)
+        await hass.async_add_executor_job(obj.update)
         await obj.initialize_unique_id(hass)
         entities.append(obj)
         
@@ -438,4 +438,3 @@ class LocalDaikin(ClimateEntity):
         
         self._energy_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1]
         self._runtime_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
-        self.schedule_update_ha_state()
