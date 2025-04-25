@@ -67,7 +67,7 @@ class DaikinFanSpeedSelect(BaseDaikinSelect):
     @property
     def options(self):
         if not self._climate:
-            _LOGGER.warning("[SelectEntity] Climate not initialized")
+#            _LOGGER.warning("[SelectEntity] Climate not initialized")
             return []
 ##        _LOGGER.warning(f"[SelectEntity] fan_modes = {self._climate.fan_modes}")
         return self._climate.fan_modes
