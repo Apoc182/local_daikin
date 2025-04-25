@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure Local Daikin",
+        "description": "Enter the IP address of your Daikin air conditioner.",
+        "data": {
+          "ip_address": "IP Address"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the device.",
+      "unknown": "An unknown error occurred."
+    },
+    "abort": {
+      "already_configured": "This Daikin device is already configured."
+    }
+  }
+}

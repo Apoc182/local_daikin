@@ -1,28 +1,36 @@
 # Local Daikin Integration
+This is a full integration for Daikin air conditioners using local network access. It includes UI-based setup and supports climate control, switches, selects, and sensors.
 Built quick and dirty as a bridge until we have a better solution available, this custom integration allows you to connect Daikin air conditioners, specifically those running firmware version 2.8.0, to Home Assistant. It serves as a temporary solution to ensure compatibility until the official Home Assistant team can address the issue.
 
-# Installation
-To install this integration, use the Home Assistant Community Store (HACS).
+## 🔧 Installation
 
-# Configuration
-After installation, add the integration using the IP address of your Daikin air conditioner:
+1. Copy the `local_daikin` folder into your Home Assistant `custom_components` directory:
+   ```
+   <config>/custom_components/local_daikin/
+   ```
 
-```yaml
-climate:
-  - platform: local_daikin
-    ip_address: X.X.X.Y
-```
+2. Restart Home Assistant.
 
-Alternatively, if you have mutliple appliances.
+3. Go to:
+   **Settings → Devices & Services → Add Integration → Local Daikin**
 
-```yaml
-climate:
-  - platform: local_daikin
-    ip_address:
-      - X.X.X.Y
-      - X.X.X.Z
-      ...
-```
+4. Enter the IP address of your Daikin air conditioner.
+
+## Features
+
+- Full climate control (temperature, HVAC mode, fan, swing)
+- Extra entities:
+  - Switches: Power, Quiet Fan, Swing Mode
+  - Select: HVAC Mode Fan Speed, Swing Mode
+
+  - Sensors: Outdoor temperature, energy today, runtime today indoor temp, humidity
+  - Sensor: Target temperature (Not programming only, not in UI, Null if not applicable due to HVAC Mode)
+
+## Notes
+
+- Ensure your Daikin unit is on the same network as Home Assistant.
+- Communicates with the `/dsiot/multireq` endpoint on your device.
+
 
 # Compatibility
 This integration has been tested and confirmed to work with the following Daikin models:

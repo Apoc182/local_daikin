@@ -1,7 +1,0 @@
-{
-  "domain": "local_daikin",
-  "name": "Local Daikin",
-  "version": "1.0",
-  "requirements": ["requests"],
-  "codeowners": ["@Apoc182"]
-}
