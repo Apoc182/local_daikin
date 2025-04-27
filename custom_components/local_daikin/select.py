@@ -6,7 +6,7 @@ import logging
 import asyncio
 
 _LOGGER = logging.getLogger(__name__)
-SCAN_INTERVAL = timedelta(seconds=15)
+SCAN_INTERVAL = timedelta(seconds=60)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]

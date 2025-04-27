@@ -18,7 +18,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 
 from datetime import timedelta
 
-SCAN_INTERVAL = timedelta(seconds=15)
+SCAN_INTERVAL = timedelta(seconds=60)
 
 # TODO make outside temp another sensor or something? Makes sense right?
 # https://github.com/home-assistant/example-custom-config/blob/master/custom_components/example_sensor/sensor.py

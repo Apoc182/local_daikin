@@ -5,7 +5,7 @@ from homeassistant.components.climate.const import HVACMode
 from datetime import timedelta
 
 _LOGGER = logging.getLogger(__name__)
-SCAN_INTERVAL = timedelta(seconds=15)
+SCAN_INTERVAL = timedelta(seconds=60)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     _LOGGER.info("Setting up Daikin switches for %s", entry.data["ip_address"])
