@@ -14,7 +14,11 @@ from typing import Any, List
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from homeassistant.helpers.device_registry import DeviceInfo
 
+from datetime import timedelta
+
+SCAN_INTERVAL = timedelta(seconds=60)
 
 # TODO make outside temp another sensor or something? Makes sense right?
 # https://github.com/home-assistant/example-custom-config/blob/master/custom_components/example_sensor/sensor.py
@@ -145,24 +149,16 @@ class DaikinRequest:
 
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up the air conditioner platform."""
-    ip_addresses = config.get('ip_address')
+async def async_setup_entry(hass, entry, async_add_entities):
+    ip = entry.data["ip_address"]
+    entity = LocalDaikin(ip)
+    await hass.async_add_executor_job(entity.update)
+    await entity.initialize_unique_id(hass)
 
-    if ip_addresses is None:
-        raise ValueError("IP address for Local Daikin is not set. Please provide 'ip_address' in the configuration.yaml.")
+    # 👇 Register entity for use by switch.py
+    hass.data["local_daikin"][entry.entry_id]["climate_entity"] = entity
 
-    if isinstance(ip_addresses, str):
-        ip_addresses = [ip_addresses]
-    
-    entities = []
-    for ip_address in ip_addresses:
-        obj = LocalDaikin(ip_address)
-        await hass.async_add_executor_job(obj.update)
-        await obj.initialize_unique_id(hass)
-        entities.append(obj)
-        
-    async_add_entities(entities)
+    async_add_entities([entity])
 
 class LocalDaikin(ClimateEntity):
     def __init__(self, ip_address: str):
@@ -181,6 +177,10 @@ class LocalDaikin(ClimateEntity):
         self._mac = None
         self._max_temp = 30 # may need some logic to set this based on the device ID
         self._min_temp = 10
+
+        self._ip = ip_address
+        self._name = f"Local Daikin ({ip_address})"
+        self._attr_unique_id = f"daikin_climate_{ip_address}"
             
 
         self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.DRY, HVACMode.FAN_ONLY]
@@ -231,6 +231,16 @@ class LocalDaikin(ClimateEntity):
         self._mac = format_mac(self.find_value_by_pn(data, "/dsiot/edge.adp_i", "adp_i", "mac"))
 
     @property
+    def device_info(self):
+        return DeviceInfo(
+            identifiers={("local_daikin", self._ip)},
+            name="Local Daikin AC",
+            manufacturer="Daikin",
+            model="LAN Adapter",
+            sw_version="1.0"
+        )
+
+    @property
     def name(self):
         """Return the name of the entity."""
         return self._name
@@ -238,16 +248,32 @@ class LocalDaikin(ClimateEntity):
     @property
     def hvac_mode(self):
         """Return current operation."""
-        return self._hvac_mode
+        return self._hvac_mode.value
 
     @property
     def fan_mode(self):
         """Return current operation."""
-        return self._fan_mode
+        return self._fan_mode.value
 
     @property
     def swing_mode(self):
         return self._swing_mode
+
+    @property
+    def fan_modes(self):
+        return [mode.value for mode in self._attr_fan_modes]
+
+    @property
+    def swing_modes(self):
+        return self._attr_swing_modes
+
+    @property
+    def hvac_modes(self):
+        return [mode.value for mode in self._attr_hvac_modes]
+
+    @property
+    def should_poll(self):
+        return True
 
     def set_fan_mode(self, fan_mode: str):
         mode = FAN_MODE_MAP[fan_mode]
@@ -295,8 +321,11 @@ class LocalDaikin(ClimateEntity):
 
     @property
     def target_temperature(self):
-        """Return the temperature we try to reach."""
-        return self._target_temperature
+        """Return the temperature we try to reach or None in non-settable modes."""
+        if self._hvac_mode in (HVACMode.COOL, HVACMode.HEAT, HVACMode.AUTO):
+            return self._target_temperature if self._target_temperature is not None else 22.0
+        else:
+            return None
 
     @property
     def current_temperature(self):
@@ -416,18 +445,23 @@ class LocalDaikin(ClimateEntity):
         # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
         name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
         if name is not None:
-            self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
+            try:
+                self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
+            except Exception:
+                _LOGGER.warning("No target temperature found, setting fallback.")
+                self._target_temperature = 22.0  # default
         else:
-            self._target_temperature = None
-        
+            self._target_temperature = None        
+
         # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
         # for this temperature is limited to integers. So the passed divisor is 1.
         self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
 
         # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
-        fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
+        fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self._hvac_mode)
         if fan_mode_key_name is not None:
-            self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])]
+            hex_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", fan_mode_key_name)
+            self._fan_mode = REVERSE_FAN_MODE_MAP[hex_value]
         else:
             self._fan_mode = HAFanMode.FAN_AUTO
 

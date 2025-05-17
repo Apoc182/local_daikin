@@ -1,7 +1,12 @@
 {
   "domain": "local_daikin",
   "name": "Local Daikin",
-  "version": "1.0",
-  "requirements": ["requests"],
-  "codeowners": ["@Apoc182"]
+  "version": "1.0.0",
+  "documentation": "https://github.com/Apoc182/local_daikin",
+  "requirements": [],
+  "dependencies": [],
+  "codeowners": ["@Apoc182"],
+  "iot_class": "local_polling",
+  "config_flow": true,
+  "supported_platforms": ["climate", "sensor", "switch", "select"]
 }
