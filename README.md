@@ -27,7 +27,7 @@ Built quick and dirty as a bridge until we have a better solution available, thi
   - Sensor: Target temperature (Not programming only, not in UI, Null if not applicable due to HVAC Mode)
 
 ## Notes
-
+- If upgrading from v0.0.5 (or earlier), you will need to delete the manual configuration in your `configuration.yaml` and reconfigure via the Home Assistant devices panel.
 - Ensure your Daikin unit is on the same network as Home Assistant.
 - Communicates with the `/dsiot/multireq` endpoint on your device.
 
