@@ -1,9 +1,5 @@
 from datetime import timedelta
-from homeassistant.components.sensor import (
-    SensorEntity,
-    SensorDeviceClass,
-    SensorStateClass,
-)
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfTemperature, PERCENTAGE, UnitOfTime, UnitOfEnergy
 from homeassistant.helpers.device_registry import DeviceInfo
 
@@ -56,21 +52,13 @@ class DaikinEnergyTodaySensor(SensorEntity):
         self._entry_id = entry_id
         self._ip = ip
         self._state = None
-
-        # — NAME / UNIQUE ID —
         self._attr_name = f"Daikin Energy Today ({ip})"
         self._attr_unique_id = f"daikin_energy_today_{ip}"
-
-        # — UNIT / DEVICE CLASS / STATE CLASS —
-        # Use Wh (HA will convert to kWh for display)
-        self._attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR  
-        self._attr_device_class = SensorDeviceClass.ENERGY  
-        # Because “today’s energy” resets daily and only increases until reset:
+        self._attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
+        self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
-
         self._attr_should_poll = True
         self._attr_scan_interval = SCAN_INTERVAL
-
         self._attr_device_info = DeviceInfo(
             identifiers={("local_daikin", self._ip)},
             name="Local Daikin AC",
@@ -81,7 +69,6 @@ class DaikinEnergyTodaySensor(SensorEntity):
         return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
 
     def update(self):
-        # Pull the latest from the underlying climate entity
         climate = self._get_climate_entity()
         climate.update()
         self._state = climate.extra_state_attributes.get("energy_today")
