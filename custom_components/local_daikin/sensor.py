@@ -1,6 +1,6 @@
 from datetime import timedelta
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.const import UnitOfTemperature, PERCENTAGE, UnitOfTime
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
+from homeassistant.const import UnitOfTemperature, PERCENTAGE, UnitOfTime, UnitOfEnergy
 from homeassistant.helpers.device_registry import DeviceInfo
 
 SCAN_INTERVAL = timedelta(seconds=60)
@@ -53,28 +53,29 @@ class DaikinEnergyTodaySensor(SensorEntity):
         self._ip = ip
         self._state = None
         self._attr_name = f"Daikin Energy Today ({ip})"
-        self._attr_native_unit_of_measurement = "Wh"
         self._attr_unique_id = f"daikin_energy_today_{ip}"
+        self._attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_should_poll = True
+        self._attr_scan_interval = SCAN_INTERVAL
+        self._attr_device_info = DeviceInfo(
+            identifiers={("local_daikin", self._ip)},
+            name="Local Daikin AC",
+            manufacturer="Daikin",
+        )
 
     def _get_climate_entity(self):
         return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
 
     def update(self):
-        entity = self._get_climate_entity()
-        entity.update()
-        self._state = entity.extra_state_attributes.get("energy_today")
+        climate = self._get_climate_entity()
+        climate.update()
+        self._state = climate.extra_state_attributes.get("energy_today")
 
     @property
     def native_value(self):
         return self._state
-
-    @property
-    def device_info(self):
-        return DeviceInfo(
-            identifiers={("local_daikin", self._ip)},
-            name="Local Daikin AC",
-            manufacturer="Daikin"
-        )
 
 class DaikinCurrentHumiditySensor(SensorEntity):
     def __init__(self, hass, entry_id, ip):
