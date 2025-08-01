@@ -364,7 +364,10 @@ class LocalDaikin(ClimateEntity):
 
     @staticmethod
     def hex_to_temp(value: str, divisor=2) -> float:
-        return int(value[:2], 16) / divisor
+        temp = int(value[:2], 16)
+        if temp >= 128:
+            temp -= 256
+        return temp / divisor
 
 
     def set_temperature(self, temperature: float, **kwargs):
