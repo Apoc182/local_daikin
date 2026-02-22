@@ -248,9 +248,12 @@ class LocalDaikin(ClimateEntity):
                 raise Exception(f"Unknown hvac mode {hvac_mode}")
             attribute = DaikinAttribute("p_01", new_mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
 
+            # Optimistic update
+            self._hvac_mode = hvac_mode
+
             # Potentially add the turn on attribute here, unsure.
             self.turn_on()
-            self.update_attribute(DaikinRequest([attribute]).serialize())
+            self._send_attribute(DaikinRequest([attribute]).serialize())
 
 
     async def initialize_unique_id(self, hass):
@@ -317,18 +320,20 @@ class LocalDaikin(ClimateEntity):
 
         # If in dry mode for example, you cannot set the fan speed. So we ignore anything we cant find in this map.
         if name is not None:
+            self._fan_mode = HAFanMode(fan_mode)  # optimistic
             mode_attr = DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-            self.update_attribute(DaikinRequest([mode_attr]).serialize())
+            self._send_attribute(DaikinRequest([mode_attr]).serialize())
         else:
             self._fan_mode = HAFanMode.FAN_AUTO
 
     def set_swing_mode(self, swing_mode: str):
         if self.hvac_mode == HVACMode.OFF:
             return
+        self._swing_mode = swing_mode  # optimistic
         vertical_axis_command = TURN_OFF_SWING_AXIS if swing_mode in (SWING_OFF, SWING_HORIZONTAL) else TURN_ON_SWING_AXIS
         horizontal_axis_command = TURN_OFF_SWING_AXIS if swing_mode in (SWING_OFF, SWING_VERTICAL) else TURN_ON_SWING_AXIS
         vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
-        self.update_attribute(
+        self._send_attribute(
             DaikinRequest(
                 [
                     DaikinAttribute(horizontal_attr_name, horizontal_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"),
@@ -413,11 +418,14 @@ class LocalDaikin(ClimateEntity):
             _LOGGER.error(f"Cannot set temperature in {self.hvac_mode} mode.")
             return
 
+        self._target_temperature = temperature  # optimistic
         temperature_hex = format(int(temperature * 2), '02x') 
         temp_attr = DaikinAttribute(attr_name, temperature_hex, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-        self.update_attribute(DaikinRequest([temp_attr]).serialize())
+        self._send_attribute(DaikinRequest([temp_attr]).serialize())
 
-    def update_attribute(self, request: dict, *keys) -> None:
+    def _send_attribute(self, request: dict) -> None:
+        """Send a command to the Daikin unit. Does NOT poll for updated state afterwards
+        (optimistic updates handle the UI; next poll cycle confirms)."""
         _LOGGER.info(request)
         try:
             response = requests.put(self.url, json=request, timeout=REQUEST_TIMEOUT).json()
@@ -428,14 +436,13 @@ class LocalDaikin(ClimateEntity):
         if response['responses'][0]['rsc'] != 2004:
             raise Exception(f"An exception occured:\n{response}")
 
-        self.update()
-
     def _update_state(self, state: bool):
         attribute = DaikinAttribute("p_01", "00" if not state else "01", ["e_1002", "e_A002"], "/dsiot/edge/adr_0100.dgc_status")
-        self.update_attribute(DaikinRequest([attribute]).serialize())
+        self._send_attribute(DaikinRequest([attribute]).serialize())
 
     def turn_off(self):
         _LOGGER.info("Turned off")
+        self._hvac_mode = HVACMode.OFF  # optimistic
         self._update_state(False)
 
     def turn_on(self):
