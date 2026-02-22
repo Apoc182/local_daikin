@@ -2,6 +2,9 @@ from datetime import timedelta
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfTemperature, PERCENTAGE, UnitOfTime, UnitOfEnergy
 from homeassistant.helpers.device_registry import DeviceInfo
+import logging
+
+_LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -16,23 +19,37 @@ async def async_setup_entry(hass, entry, async_add_entities):
         DaikinTargetTempSensor(hass, entry.entry_id, ip),
     ])
 
-class DaikinOutdoorTempSensor(SensorEntity):
-    def __init__(self, hass, entry_id, ip):
+
+class BaseDaikinSensor(SensorEntity):
+    """Base sensor that reads cached state from the climate entity (no extra HTTP calls)."""
+
+    def __init__(self, hass, entry_id, ip, name_suffix, unique_id_suffix):
         self._hass = hass
         self._entry_id = entry_id
         self._ip = ip
         self._state = None
-        self._attr_name = f"Daikin Outside Temp ({ip})"
-        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-        self._attr_unique_id = f"daikin_outside_temp_{ip}"
+        self._attr_name = f"Daikin {name_suffix} ({ip})"
+        self._attr_unique_id = f"daikin_{unique_id_suffix}_{ip}"
 
     def _get_climate_entity(self):
-        return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
+        data = self._hass.data.get("local_daikin", {}).get(self._entry_id, {})
+        return data.get("climate_entity")
+
+    @property
+    def available(self) -> bool:
+        entity = self._get_climate_entity()
+        return entity is not None and entity.available
 
     def update(self):
+        """Read cached values from climate entity — do NOT call entity.update()."""
         entity = self._get_climate_entity()
-        entity.update()
-        self._state = entity.extra_state_attributes.get("outside_temperature")
+        if entity is None:
+            return
+        self._read_state(entity)
+
+    def _read_state(self, entity):
+        """Override in subclasses to read the relevant value."""
+        pass
 
     @property
     def native_value(self):
@@ -46,145 +63,59 @@ class DaikinOutdoorTempSensor(SensorEntity):
             manufacturer="Daikin"
         )
 
-class DaikinEnergyTodaySensor(SensorEntity):
+
+class DaikinOutdoorTempSensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
-        self._hass = hass
-        self._entry_id = entry_id
-        self._ip = ip
-        self._state = None
-        self._attr_name = f"Daikin Energy Today ({ip})"
-        self._attr_unique_id = f"daikin_energy_today_{ip}"
+        super().__init__(hass, entry_id, ip, "Outside Temp", "outside_temp")
+        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def _read_state(self, entity):
+        self._state = entity.extra_state_attributes.get("outside_temperature")
+
+
+class DaikinEnergyTodaySensor(BaseDaikinSensor):
+    def __init__(self, hass, entry_id, ip):
+        super().__init__(hass, entry_id, ip, "Energy Today", "energy_today")
         self._attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
         self._attr_should_poll = True
-        self._attr_scan_interval = SCAN_INTERVAL
-        self._attr_device_info = DeviceInfo(
-            identifiers={("local_daikin", self._ip)},
-            name="Local Daikin AC",
-            manufacturer="Daikin",
-        )
 
-    def _get_climate_entity(self):
-        return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
+    def _read_state(self, entity):
+        self._state = entity.extra_state_attributes.get("energy_today")
 
-    def update(self):
-        climate = self._get_climate_entity()
-        climate.update()
-        self._state = climate.extra_state_attributes.get("energy_today")
 
-    @property
-    def native_value(self):
-        return self._state
-
-class DaikinCurrentHumiditySensor(SensorEntity):
+class DaikinCurrentHumiditySensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
-        self._hass = hass
-        self._entry_id = entry_id
-        self._ip = ip
-        self._state = None
-        self._attr_name = f"Daikin Current Humidity ({ip})"
+        super().__init__(hass, entry_id, ip, "Current Humidity", "current_humidity")
         self._attr_native_unit_of_measurement = PERCENTAGE
-        self._attr_unique_id = f"daikin_current_humidity_{ip}"
 
-    def _get_climate_entity(self):
-        return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
-
-    def update(self):
-        entity = self._get_climate_entity()
-        entity.update()
+    def _read_state(self, entity):
         self._state = entity.current_humidity
 
-    @property
-    def native_value(self):
-        return self._state
 
-    @property
-    def device_info(self):
-        return DeviceInfo(
-            identifiers={("local_daikin", self._ip)},
-            name="Local Daikin AC",
-            manufacturer="Daikin"
-        )
-
-class DaikinIndoorTempSensor(SensorEntity):
+class DaikinIndoorTempSensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
-        self._hass = hass
-        self._entry_id = entry_id
-        self._ip = ip
-        self._state = None
-        self._attr_name = f"Daikin Indoor Temp ({ip})"
+        super().__init__(hass, entry_id, ip, "Indoor Temp", "indoor_temp")
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-        self._attr_unique_id = f"daikin_indoor_temp_{ip}"
 
-    def _get_climate_entity(self):
-        return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
-
-    def update(self):
-        entity = self._get_climate_entity()
-        entity.update()
+    def _read_state(self, entity):
         self._state = entity.current_temperature
 
-    @property
-    def native_value(self):
-        return self._state
 
-    @property
-    def device_info(self):
-        return DeviceInfo(
-            identifiers={("local_daikin", self._ip)},
-            name="Local Daikin AC",
-            manufacturer="Daikin"
-        )
-
-class DaikinRuntimeTodaySensor(SensorEntity):
+class DaikinRuntimeTodaySensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
-        self._hass = hass
-        self._entry_id = entry_id
-        self._ip = ip
-        self._state = None
-        self._attr_name = f"Daikin Runtime Today ({ip})"
+        super().__init__(hass, entry_id, ip, "Runtime Today", "runtime_today")
         self._attr_native_unit_of_measurement = UnitOfTime.MINUTES
-        self._attr_unique_id = f"daikin_runtime_today_{ip}"
 
-    def _get_climate_entity(self):
-        return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
-
-    def update(self):
-        entity = self._get_climate_entity()
-        entity.update()
+    def _read_state(self, entity):
         self._state = entity.extra_state_attributes.get("runtime_today")
 
-    @property
-    def native_value(self):
-        return self._state
 
-    @property
-    def device_info(self):
-        return DeviceInfo(
-            identifiers={("local_daikin", self._ip)},
-            name="Local Daikin AC",
-            manufacturer="Daikin"
-        )
-
-class DaikinTargetTempSensor(SensorEntity):
+class DaikinTargetTempSensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
-        self._hass = hass
-        self._entry_id = entry_id
-        self._ip = ip
-        self._state = None
-        self._attr_name = f"Daikin Target Temp ({ip})"
+        super().__init__(hass, entry_id, ip, "Target Temp", "target_temp")
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-        self._attr_unique_id = f"daikin_target_temp_{ip}"
 
-    def _get_climate_entity(self):
-        return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
-
-    def update(self):
-        entity = self._get_climate_entity()
-        entity.update()
+    def _read_state(self, entity):
         self._state = entity.target_temperature
-
-    @property
-    def native_value(self):
-        return self._state

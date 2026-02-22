@@ -1,5 +1,6 @@
 import logging
 import requests
+from requests.exceptions import RequestException
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature
 from homeassistant.components.climate.const import (
     HVACMode,
@@ -20,8 +21,12 @@ from datetime import timedelta
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
-# TODO make outside temp another sensor or something? Makes sense right?
-# https://github.com/home-assistant/example-custom-config/blob/master/custom_components/example_sensor/sensor.py
+# Timeout for all HTTP requests to the Daikin unit (seconds)
+REQUEST_TIMEOUT = 10
+
+# Retry settings for initial setup
+SETUP_MAX_RETRIES = 3
+SETUP_RETRY_DELAY = 5  # seconds
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -152,10 +157,34 @@ class DaikinRequest:
 async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]
     entity = LocalDaikin(ip)
-    await hass.async_add_executor_job(entity.update)
-    await entity.initialize_unique_id(hass)
 
-    # 👇 Register entity for use by switch.py
+    # Retry initial update with backoff — Daikin units can be slow after HA reboot
+    import asyncio
+    for attempt in range(1, SETUP_MAX_RETRIES + 1):
+        try:
+            await hass.async_add_executor_job(entity.update)
+            break
+        except Exception as err:
+            if attempt < SETUP_MAX_RETRIES:
+                _LOGGER.warning(
+                    "Daikin %s: setup attempt %d/%d failed (%s), retrying in %ds...",
+                    ip, attempt, SETUP_MAX_RETRIES, err, SETUP_RETRY_DELAY * attempt
+                )
+                await asyncio.sleep(SETUP_RETRY_DELAY * attempt)
+            else:
+                _LOGGER.error(
+                    "Daikin %s: setup failed after %d attempts (%s). "
+                    "Entity will be added in unavailable state and retry on next poll.",
+                    ip, SETUP_MAX_RETRIES, err
+                )
+                entity._available = False
+
+    try:
+        await entity.initialize_unique_id(hass)
+    except Exception as err:
+        _LOGGER.warning("Daikin %s: could not fetch MAC for unique_id (%s), using IP fallback", ip, err)
+
+    # Register entity for use by switch.py / select.py / sensor.py
     hass.data["local_daikin"][entry.entry_id]["climate_entity"] = entity
 
     async_add_entities([entity])
@@ -177,6 +206,7 @@ class LocalDaikin(ClimateEntity):
         self._mac = None
         self._max_temp = 30 # may need some logic to set this based on the device ID
         self._min_temp = 10
+        self._available = True
 
         self._ip = ip_address
         self._name = f"Local Daikin ({ip_address})"
@@ -202,6 +232,10 @@ class LocalDaikin(ClimateEntity):
         self._attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.FAN_MODE | ClimateEntityFeature.SWING_MODE
         self._enable_turn_on_off_backwards_compatibility = False
         
+    @property
+    def available(self) -> bool:
+        """Return True if the entity is available."""
+        return self._available
 
     def set_hvac_mode(self, hvac_mode):
         _LOGGER.info("Set Hvac mode to " + str(hvac_mode))
@@ -214,9 +248,12 @@ class LocalDaikin(ClimateEntity):
                 raise Exception(f"Unknown hvac mode {hvac_mode}")
             attribute = DaikinAttribute("p_01", new_mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
 
+            # Optimistic update
+            self._hvac_mode = hvac_mode
+
             # Potentially add the turn on attribute here, unsure.
             self.turn_on()
-            self.update_attribute(DaikinRequest([attribute]).serialize())
+            self._send_attribute(DaikinRequest([attribute]).serialize())
 
 
     async def initialize_unique_id(self, hass):
@@ -225,7 +262,9 @@ class LocalDaikin(ClimateEntity):
                 {"op": 2, "to": "/dsiot/edge.adp_i"}
             ]
         }
-        response = await hass.async_add_executor_job(lambda: requests.post(self.url, json=payload))
+        response = await hass.async_add_executor_job(
+            lambda: requests.post(self.url, json=payload, timeout=REQUEST_TIMEOUT)
+        )
         response.raise_for_status()
         data = response.json()
         self._mac = format_mac(self.find_value_by_pn(data, "/dsiot/edge.adp_i", "adp_i", "mac"))
@@ -281,18 +320,20 @@ class LocalDaikin(ClimateEntity):
 
         # If in dry mode for example, you cannot set the fan speed. So we ignore anything we cant find in this map.
         if name is not None:
+            self._fan_mode = HAFanMode(fan_mode)  # optimistic
             mode_attr = DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-            self.update_attribute(DaikinRequest([mode_attr]).serialize())
+            self._send_attribute(DaikinRequest([mode_attr]).serialize())
         else:
             self._fan_mode = HAFanMode.FAN_AUTO
 
     def set_swing_mode(self, swing_mode: str):
         if self.hvac_mode == HVACMode.OFF:
             return
+        self._swing_mode = swing_mode  # optimistic
         vertical_axis_command = TURN_OFF_SWING_AXIS if swing_mode in (SWING_OFF, SWING_HORIZONTAL) else TURN_ON_SWING_AXIS
         horizontal_axis_command = TURN_OFF_SWING_AXIS if swing_mode in (SWING_OFF, SWING_VERTICAL) else TURN_ON_SWING_AXIS
         vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
-        self.update_attribute(
+        self._send_attribute(
             DaikinRequest(
                 [
                     DaikinAttribute(horizontal_attr_name, horizontal_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"),
@@ -374,28 +415,34 @@ class LocalDaikin(ClimateEntity):
         _LOGGER.info("Temp change to " + str(temperature) + " requested.")
         attr_name = HVAC_TO_TEMP_HEX.get(self.hvac_mode)
         if attr_name is None:
-            _LOGGER.error(f"Cannot set temperature in {self.hvac} mode.")
+            _LOGGER.error(f"Cannot set temperature in {self.hvac_mode} mode.")
             return
 
+        self._target_temperature = temperature  # optimistic
         temperature_hex = format(int(temperature * 2), '02x') 
         temp_attr = DaikinAttribute(attr_name, temperature_hex, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-        self.update_attribute(DaikinRequest([temp_attr]).serialize())
+        self._send_attribute(DaikinRequest([temp_attr]).serialize())
 
-    def update_attribute(self, request: dict, *keys) -> None:
+    def _send_attribute(self, request: dict) -> None:
+        """Send a command to the Daikin unit. Does NOT poll for updated state afterwards
+        (optimistic updates handle the UI; next poll cycle confirms)."""
         _LOGGER.info(request)
-        response = requests.put(self.url, json=request).json()
+        try:
+            response = requests.put(self.url, json=request, timeout=REQUEST_TIMEOUT).json()
+        except RequestException as err:
+            _LOGGER.error("Daikin %s: failed to send command: %s", self._ip, err)
+            raise
         _LOGGER.info(response)
         if response['responses'][0]['rsc'] != 2004:
             raise Exception(f"An exception occured:\n{response}")
 
-        self.update()
-
     def _update_state(self, state: bool):
         attribute = DaikinAttribute("p_01", "00" if not state else "01", ["e_1002", "e_A002"], "/dsiot/edge/adr_0100.dgc_status")
-        self.update_attribute(DaikinRequest([attribute]).serialize())
+        self._send_attribute(DaikinRequest([attribute]).serialize())
 
     def turn_off(self):
         _LOGGER.info("Turned off")
+        self._hvac_mode = HVACMode.OFF  # optimistic
         self._update_state(False)
 
     def turn_on(self):
@@ -434,44 +481,57 @@ class LocalDaikin(ClimateEntity):
             ]
         }
 
-        response = requests.post(self.url, json=payload)
-        response.raise_for_status()
+        try:
+            response = requests.post(self.url, json=payload, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+        except RequestException as err:
+            _LOGGER.warning("Daikin %s: update failed (%s), will retry next poll", self._ip, err)
+            self._available = False
+            return
+
         data = response.json()
-        _LOGGER.info(data)
 
-        # Set the HVAC mode.
-        is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
-        self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
+        try:
+            # Set the HVAC mode.
+            is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
+            self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
 
-        self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
+            self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
 
-        # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
-        name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
-        if name is not None:
-            try:
-                self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
-            except Exception:
-                _LOGGER.warning("No target temperature found, setting fallback.")
-                self._target_temperature = 22.0  # default
-        else:
-            self._target_temperature = None        
+            # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
+            name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
+            if name is not None:
+                try:
+                    self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
+                except Exception:
+                    _LOGGER.warning("No target temperature found, setting fallback.")
+                    self._target_temperature = 22.0  # default
+            else:
+                self._target_temperature = None        
 
-        # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
-        # for this temperature is limited to integers. So the passed divisor is 1.
-        self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
+            # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
+            # for this temperature is limited to integers. So the passed divisor is 1.
+            self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
 
-        # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
-        fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self._hvac_mode)
-        if fan_mode_key_name is not None:
-            hex_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", fan_mode_key_name)
-            self._fan_mode = REVERSE_FAN_MODE_MAP[hex_value]
-        else:
-            self._fan_mode = HAFanMode.FAN_AUTO
+            # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
+            fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self._hvac_mode)
+            if fan_mode_key_name is not None:
+                hex_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", fan_mode_key_name)
+                self._fan_mode = REVERSE_FAN_MODE_MAP[hex_value]
+            else:
+                self._fan_mode = HAFanMode.FAN_AUTO
 
-        self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
+            self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
 
-        if not self.hvac_mode == HVACMode.OFF:
-            self._swing_mode = self.get_swing_state(data)
-        
-        self._energy_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1]
-        self._runtime_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
+            if not self.hvac_mode == HVACMode.OFF:
+                self._swing_mode = self.get_swing_state(data)
+            
+            self._energy_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1]
+            self._runtime_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
+
+            # Successfully parsed — mark available
+            self._available = True
+
+        except Exception as err:
+            _LOGGER.warning("Daikin %s: failed to parse update response (%s)", self._ip, err)
+            self._available = False
