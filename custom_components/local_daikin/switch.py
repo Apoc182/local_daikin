@@ -15,36 +15,44 @@ async def async_setup_entry(hass, entry, async_add_entities):
     ])
 
 
-
 class DaikinPowerSwitch(SwitchEntity):
     def __init__(self, hass, entry_id, ip):
-
         self._hass = hass
         self._entry_id = entry_id
         self._ip = ip
         self._state = None
         self._attr_name = f"Daikin Power ({ip})"
         self._attr_unique_id = f"daikin_power_{ip}"
-        self._attr_should_poll = True 
-        _LOGGER.info("Created DaikinPowerSwitch for %s", self._ip)
+        self._attr_should_poll = True
 
     def _get_climate_entity(self):
-        return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
+        data = self._hass.data.get("local_daikin", {}).get(self._entry_id, {})
+        return data.get("climate_entity")
+
+    @property
+    def available(self) -> bool:
+        entity = self._get_climate_entity()
+        return entity is not None and entity.available
 
     def update(self):
+        """Read cached state from climate entity — no extra HTTP call."""
         entity = self._get_climate_entity()
-        entity.update()
-        _LOGGER.info(f"[PowerSwitch] Climate hvac_mode: {entity.hvac_mode}")
+        if entity is None:
+            return
         self._state = entity.hvac_mode != "off"
 
     def turn_on(self, **kwargs):
         entity = self._get_climate_entity()
+        if entity is None:
+            return
         entity.turn_on()
         self._state = True
         self.schedule_update_ha_state(force_refresh=True)
 
     def turn_off(self, **kwargs):
         entity = self._get_climate_entity()
+        if entity is None:
+            return
         entity.turn_off()
         self._state = False
         self.schedule_update_ha_state(force_refresh=True)
@@ -69,21 +77,29 @@ class DaikinQuietFanSwitch(SwitchEntity):
         self._state = None
         self._attr_name = f"Daikin Quiet Fan ({ip})"
         self._attr_unique_id = f"daikin_quietfan_{ip}"
-        self._attr_should_poll = True 
-        _LOGGER.info("Created DaikinQuietFanSwitch for %s", self._ip)
+        self._attr_should_poll = True
 
     def _get_climate_entity(self):
-        return self._hass.data["local_daikin"][self._entry_id]["climate_entity"]
+        data = self._hass.data.get("local_daikin", {}).get(self._entry_id, {})
+        return data.get("climate_entity")
+
+    @property
+    def available(self) -> bool:
+        entity = self._get_climate_entity()
+        return entity is not None and entity.available
 
     def update(self):
-        """Sync with current fan mode from the climate entity."""
+        """Read cached state from climate entity — no extra HTTP call."""
         entity = self._get_climate_entity()
-        entity.update()
+        if entity is None:
+            return
         self._state = entity.fan_mode == "Quiet"
 
     def turn_on(self, **kwargs):
         """Set fan mode to Quiet."""
         entity = self._get_climate_entity()
+        if entity is None:
+            return
         entity.set_fan_mode("Quiet")
         self._state = True
         self.schedule_update_ha_state(force_refresh=True)
@@ -91,6 +107,8 @@ class DaikinQuietFanSwitch(SwitchEntity):
     def turn_off(self, **kwargs):
         """Set fan mode to Auto."""
         entity = self._get_climate_entity()
+        if entity is None:
+            return
         entity.set_fan_mode("Auto")
         self._state = False
         self.schedule_update_ha_state(force_refresh=True)

@@ -12,8 +12,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]
     _LOGGER.info("Waiting for Daikin climate entity to be available for %s", ip)
 
-    # Wait up to 10 seconds for climate entity to register
-    for _ in range(100):
+    # Wait up to 60 seconds for climate entity to register (Daikin units can be very slow)
+    for _ in range(600):
         climate_entity = hass.data["local_daikin"][entry.entry_id].get("climate_entity")
         if climate_entity:
             break
