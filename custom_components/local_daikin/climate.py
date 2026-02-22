@@ -411,6 +411,19 @@ class LocalDaikin(ClimateEntity):
             if not found:
                 raise Exception(f'Key {current_key} not found')
 
+    @staticmethod
+    def try_find_value_by_pn(data: dict, fr: str, *keys):
+        try:
+            return LocalDaikin.find_value_by_pn(data, fr, *keys)
+        except Exception as err:
+            _LOGGER.warning(
+                "Daikin: missing data for %s %s (%s)",
+                fr,
+                " -> ".join(keys),
+                err,
+            )
+            return None
+
 
     @staticmethod
     def hex_to_temp(value: str, divisor=2) -> float:
@@ -502,10 +515,41 @@ class LocalDaikin(ClimateEntity):
 
         try:
             # Set the HVAC mode.
-            is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
-            self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
+            is_off_raw = self.try_find_value_by_pn(
+                data,
+                "/dsiot/edge/adr_0100.dgc_status",
+                "dgc_status",
+                "e_1002",
+                "e_A002",
+                "p_01",
+            )
+            is_off = (is_off_raw == "00") if is_off_raw is not None else None
 
-            self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
+            mode_raw = self.try_find_value_by_pn(
+                data,
+                "/dsiot/edge/adr_0100.dgc_status",
+                "dgc_status",
+                "e_1002",
+                "e_3001",
+                "p_01",
+            )
+            if is_off is True:
+                self._hvac_mode = HVACMode.OFF
+            elif mode_raw in MODE_MAP:
+                self._hvac_mode = MODE_MAP[mode_raw]
+            elif mode_raw is not None:
+                _LOGGER.warning("Daikin %s: unknown hvac mode code %s", self._ip, mode_raw)
+
+            outside_raw = self.try_find_value_by_pn(
+                data,
+                '/dsiot/edge/adr_0200.dgc_status',
+                'dgc_status',
+                'e_1003',
+                'e_A00D',
+                'p_01',
+            )
+            if outside_raw is not None:
+                self._outside_temperature = self.hex_to_temp(outside_raw)
 
             # Update target temperature.
             # When OFF/DRY/FAN_ONLY, try to preserve the last known target temp so the
@@ -513,16 +557,16 @@ class LocalDaikin(ClimateEntity):
             name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
             if name is not None:
                 try:
-                    self._target_temperature = self.hex_to_temp(
-                        self.find_value_by_pn(
-                            data,
-                            '/dsiot/edge/adr_0100.dgc_status',
-                            'dgc_status',
-                            'e_1002',
-                            'e_3001',
-                            name,
-                        )
+                    target_raw = self.try_find_value_by_pn(
+                        data,
+                        '/dsiot/edge/adr_0100.dgc_status',
+                        'dgc_status',
+                        'e_1002',
+                        'e_3001',
+                        name,
                     )
+                    if target_raw is not None:
+                        self._target_temperature = self.hex_to_temp(target_raw)
                 except Exception:
                     _LOGGER.warning("No target temperature found, keeping previous or using fallback.")
                     if self._target_temperature is None:
@@ -530,39 +574,85 @@ class LocalDaikin(ClimateEntity):
             else:
                 # Best effort: grab the cooling target temp (p_02) so the dial still has a value.
                 try:
-                    self._target_temperature = self.hex_to_temp(
-                        self.find_value_by_pn(
-                            data,
-                            '/dsiot/edge/adr_0100.dgc_status',
-                            'dgc_status',
-                            'e_1002',
-                            'e_3001',
-                            'p_02',
-                        )
+                    target_raw = self.try_find_value_by_pn(
+                        data,
+                        '/dsiot/edge/adr_0100.dgc_status',
+                        'dgc_status',
+                        'e_1002',
+                        'e_3001',
+                        'p_02',
                     )
+                    if target_raw is not None:
+                        self._target_temperature = self.hex_to_temp(target_raw)
                 except Exception:
                     if self._target_temperature is None:
                         self._target_temperature = 22.0  # default fallback
 
             # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
             # for this temperature is limited to integers. So the passed divisor is 1.
-            self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
+            current_temp_raw = self.try_find_value_by_pn(
+                data,
+                '/dsiot/edge/adr_0100.dgc_status',
+                'dgc_status',
+                'e_1002',
+                'e_A00B',
+                'p_01',
+            )
+            if current_temp_raw is not None:
+                self._current_temperature = self.hex_to_temp(current_temp_raw, divisor=1)
 
             # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
             fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self._hvac_mode)
             if fan_mode_key_name is not None:
-                hex_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", fan_mode_key_name)
-                self._fan_mode = REVERSE_FAN_MODE_MAP[hex_value]
+                hex_value = self.try_find_value_by_pn(
+                    data,
+                    "/dsiot/edge/adr_0100.dgc_status",
+                    "dgc_status",
+                    "e_1002",
+                    "e_3001",
+                    fan_mode_key_name,
+                )
+                if hex_value is not None and hex_value in REVERSE_FAN_MODE_MAP:
+                    self._fan_mode = REVERSE_FAN_MODE_MAP[hex_value]
+                elif hex_value is not None:
+                    _LOGGER.warning("Daikin %s: unknown fan mode code %s", self._ip, hex_value)
             else:
                 self._fan_mode = HAFanMode.FAN_AUTO
 
-            self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
+            humidity_raw = self.try_find_value_by_pn(
+                data,
+                '/dsiot/edge/adr_0100.dgc_status',
+                'dgc_status',
+                'e_1002',
+                'e_A00B',
+                'p_02',
+            )
+            if humidity_raw is not None:
+                self._current_humidity = int(humidity_raw, 16)
 
             if not self.hvac_mode == HVACMode.OFF:
-                self._swing_mode = self.get_swing_state(data)
-            
-            self._energy_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1]
-            self._runtime_today = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
+                try:
+                    self._swing_mode = self.get_swing_state(data)
+                except Exception as err:
+                    _LOGGER.warning("Daikin %s: swing state unavailable (%s)", self._ip, err)
+
+            energy_datas = self.try_find_value_by_pn(
+                data,
+                '/dsiot/edge/adr_0100.i_power.week_power',
+                'week_power',
+                'datas',
+            )
+            if energy_datas:
+                self._energy_today = energy_datas[-1]
+
+            runtime_today = self.try_find_value_by_pn(
+                data,
+                '/dsiot/edge/adr_0100.i_power.week_power',
+                'week_power',
+                'today_runtime',
+            )
+            if runtime_today is not None:
+                self._runtime_today = runtime_today
 
             # Successfully parsed — mark available
             self._available = True
