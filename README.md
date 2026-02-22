@@ -37,7 +37,7 @@ This integration has been tested and confirmed to work with the following Daikin
   - FTKM20YVMA with firmware version 2.8.0.
   - FTXM46WVMA with firmware version 2.8.0.
 
-Compatibility with other models or firmware versions is not guaranteed.
+Compatibility with other models or firmware versions is not guaranteed. I keep my own units on firmware 2.8.0 and haven’t upgraded because I don’t want to risk breaking anything.
 
 # Feedback and Contributions
 This integration is a quick and dirty fix, and any suggestions for improvements or expansions are welcome. If you encounter issues or have ideas for enhancements, please open an issue in the GitHub repository for this project.
