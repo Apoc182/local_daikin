@@ -362,11 +362,12 @@ class LocalDaikin(ClimateEntity):
 
     @property
     def target_temperature(self):
-        """Return the temperature we try to reach or None in non-settable modes."""
-        if self._hvac_mode in (HVACMode.COOL, HVACMode.HEAT, HVACMode.AUTO):
-            return self._target_temperature if self._target_temperature is not None else 22.0
-        else:
-            return None
+        """Return the temperature we try to reach.
+
+        Always return a value so the thermostat card shows the dial even when
+        the unit is OFF/DRY/FAN_ONLY.
+        """
+        return self._target_temperature if self._target_temperature is not None else 22.0
 
     @property
     def current_temperature(self):
@@ -498,16 +499,42 @@ class LocalDaikin(ClimateEntity):
 
             self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
 
-            # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
+            # Update target temperature.
+            # When OFF/DRY/FAN_ONLY, try to preserve the last known target temp so the
+            # thermostat dial still shows.
             name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
             if name is not None:
                 try:
-                    self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
+                    self._target_temperature = self.hex_to_temp(
+                        self.find_value_by_pn(
+                            data,
+                            '/dsiot/edge/adr_0100.dgc_status',
+                            'dgc_status',
+                            'e_1002',
+                            'e_3001',
+                            name,
+                        )
+                    )
                 except Exception:
-                    _LOGGER.warning("No target temperature found, setting fallback.")
-                    self._target_temperature = 22.0  # default
+                    _LOGGER.warning("No target temperature found, keeping previous or using fallback.")
+                    if self._target_temperature is None:
+                        self._target_temperature = 22.0  # default
             else:
-                self._target_temperature = None        
+                # Best effort: grab the cooling target temp (p_02) so the dial still has a value.
+                try:
+                    self._target_temperature = self.hex_to_temp(
+                        self.find_value_by_pn(
+                            data,
+                            '/dsiot/edge/adr_0100.dgc_status',
+                            'dgc_status',
+                            'e_1002',
+                            'e_3001',
+                            'p_02',
+                        )
+                    )
+                except Exception:
+                    if self._target_temperature is None:
+                        self._target_temperature = 22.0  # default fallback
 
             # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
             # for this temperature is limited to integers. So the passed divisor is 1.
