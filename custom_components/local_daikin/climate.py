@@ -456,6 +456,13 @@ class LocalDaikin(ClimateEntity):
             raise
         _LOGGER.info(response)
         if response['responses'][0]['rsc'] != 2004:
+            _LOGGER.warning(
+                "Daikin %s: command rejected (rsc=%s). request=%s response=%s",
+                self._ip,
+                response['responses'][0].get('rsc'),
+                request,
+                response,
+            )
             raise Exception(f"An exception occured:\n{response}")
 
     def _update_state(self, state: bool):
