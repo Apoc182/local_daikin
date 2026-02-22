@@ -370,6 +370,14 @@ class LocalDaikin(ClimateEntity):
         return self._target_temperature if self._target_temperature is not None else 22.0
 
     @property
+    def target_temperature_step(self) -> float:
+        """Return the supported target temperature step.
+
+        Daikin remotes typically support 0.5°C increments.
+        """
+        return 0.5
+
+    @property
     def current_temperature(self):
         return self._current_temperature
 
