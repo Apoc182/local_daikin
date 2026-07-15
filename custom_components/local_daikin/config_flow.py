@@ -92,13 +92,16 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.exception("Unable to scan network %s", network)
                     errors["base"] = "scan_failed"
                 else:
+                    if not discovered:
+                        return self.async_abort(reason="no_devices_found")
+
                     new_ips = [
                         ip
                         for ip in discovered
                         if not self._is_ip_configured(ip)
                     ]
                     if not new_ips:
-                        return self.async_abort(reason="no_new_devices")
+                        return self.async_abort(reason="all_configured")
 
                     added = await self._async_add_entries(new_ips)
                     if added:

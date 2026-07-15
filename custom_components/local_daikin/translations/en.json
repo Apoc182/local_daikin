@@ -41,7 +41,8 @@
     "abort": {
       "already_configured": "This Daikin device is already configured.",
       "reconfigure_successful": "Daikin configuration updated.",
-      "no_new_devices": "No new Daikin devices were found.",
+      "no_devices_found": "No Daikin devices were found on the selected network.",
+      "all_configured": "All discovered Daikin devices are already configured.",
       "scan_complete": "The discovered Daikin devices were added."
     }
   }
