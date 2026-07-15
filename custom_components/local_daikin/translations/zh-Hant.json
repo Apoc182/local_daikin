@@ -1,0 +1,27 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "新增大金冷氣",
+        "description": "輸入大金 LAN 轉接器的 IP 位址。",
+        "data": {
+          "ip_address": "IP 位址"
+        }
+      },
+      "reconfigure": {
+        "title": "重新設定大金冷氣",
+        "description": "更新大金 LAN 轉接器的 IP 位址。",
+        "data": {
+          "ip_address": "IP 位址"
+        }
+      }
+    },
+    "error": {
+      "invalid_ip": "請輸入有效的 IPv4 或 IPv6 位址。"
+    },
+    "abort": {
+      "already_configured": "這台大金冷氣已經設定過了。",
+      "reconfigure_successful": "大金冷氣設定已更新。"
+    }
+  }
+}

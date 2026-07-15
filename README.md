@@ -16,6 +16,11 @@ Built quick and dirty as a bridge until we have a better solution available, thi
 
 4. Enter the IP address of your Daikin air conditioner.
 
+The integration also provides a page-based reconfiguration flow. Open the
+Local Daikin integration from **Settings → Devices & Services**, open the
+entry menu, and choose **Reconfigure** to update an adapter IP without editing
+Home Assistant storage files or removing the integration.
+
 ## Features
 
 - Full climate control (temperature, HVAC mode, fan, swing)

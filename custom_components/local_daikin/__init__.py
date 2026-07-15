@@ -1,10 +1,13 @@
 import asyncio
 
+from .const import DOMAIN
+
+
 async def async_setup(hass, config):
     return True
 
 async def async_setup_entry(hass, entry):
-    hass.data.setdefault("local_daikin", {})[entry.entry_id] = {
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
          "config": entry.data   
     }
     await hass.config_entries.async_forward_entry_setups(entry, ["climate", "switch", "sensor", "select"])
@@ -18,5 +21,5 @@ async def async_unload_entry(hass, entry):
         ])
     )
     if unload_ok:
-        hass.data["local_daikin"].pop(entry.entry_id)
+        hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
