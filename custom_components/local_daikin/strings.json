@@ -35,7 +35,9 @@
     "error": {
       "invalid_ip": "Enter a valid IPv4 or IPv6 address.",
       "invalid_network": "Enter a valid IPv4 network, such as 192.168.1.0/24.",
-      "scan_failed": "The network scan could not be completed."
+      "scan_failed": "The network scan could not be completed.",
+      "cannot_connect": "Cannot connect to the device.",
+      "unknown": "An unknown error occurred."
     },
     "abort": {
       "already_configured": "This Daikin device is already configured.",

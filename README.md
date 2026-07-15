@@ -28,6 +28,11 @@ and adds only devices that are not already configured. A custom IPv4 network
 such as `192.168.31.0/24` can be entered when the default network is not
 available.
 
+The configuration pages are available in English and Traditional Chinese and
+follow the language selected for the Home Assistant user account. This covers
+manual setup, reconfiguration, network scanning, validation errors, and scan
+results.
+
 ## Features
 
 - Full climate control (temperature, HVAC mode, fan, swing)

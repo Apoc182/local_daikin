@@ -34,7 +34,9 @@
     "error": {
       "invalid_ip": "請輸入有效的 IPv4 或 IPv6 位址。",
       "invalid_network": "請輸入有效的 IPv4 網段，例如 192.168.1.0/24。",
-      "scan_failed": "區域網路掃描無法完成。"
+      "scan_failed": "區域網路掃描無法完成。",
+      "cannot_connect": "無法連線到設備。",
+      "unknown": "發生未知錯誤。"
     },
     "abort": {
       "already_configured": "這台大金冷氣已經設定過了。",
