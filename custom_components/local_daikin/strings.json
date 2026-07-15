@@ -1,7 +1,7 @@
 {
   "title": "Local Daikin",
   "config": {
-    "menu": {
+    "step": {
       "user": {
         "title": "Configure Local Daikin",
         "description": "Choose how to add your Daikin air conditioners.",
@@ -9,10 +9,8 @@
           "manual": "Enter an IP address",
           "scan": "Scan the local network"
         }
-      }
-    },
-    "step": {
-      "user": {
+      },
+      "manual": {
         "title": "Add Daikin air conditioner",
         "description": "Enter the IP address of the Daikin LAN adapter.",
         "data": {

@@ -1,6 +1,6 @@
 {
   "config": {
-    "menu": {
+    "step": {
       "user": {
         "title": "設定 Local Daikin",
         "description": "選擇新增大金冷氣的方式。",
@@ -8,10 +8,8 @@
           "manual": "手動輸入 IP 位址",
           "scan": "掃描區域網路"
         }
-      }
-    },
-    "step": {
-      "user": {
+      },
+      "manual": {
         "title": "新增大金冷氣",
         "description": "輸入大金 LAN 轉接器的 IP 位址。",
         "data": {
