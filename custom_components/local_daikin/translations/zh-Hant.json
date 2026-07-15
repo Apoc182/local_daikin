@@ -1,5 +1,15 @@
 {
   "config": {
+    "menu": {
+      "user": {
+        "title": "設定 Local Daikin",
+        "description": "選擇新增大金冷氣的方式。",
+        "menu_options": {
+          "manual": "手動輸入 IP 位址",
+          "scan": "掃描區域網路"
+        }
+      }
+    },
     "step": {
       "user": {
         "title": "新增大金冷氣",
@@ -14,14 +24,25 @@
         "data": {
           "ip_address": "IP 位址"
         }
+      },
+      "scan": {
+        "title": "掃描區域網路",
+        "description": "掃描指定的 IPv4 網段，找出並新增尚未設定的大金 LAN 轉接器。",
+        "data": {
+          "network": "IPv4 網段"
+        }
       }
     },
     "error": {
-      "invalid_ip": "請輸入有效的 IPv4 或 IPv6 位址。"
+      "invalid_ip": "請輸入有效的 IPv4 或 IPv6 位址。",
+      "invalid_network": "請輸入有效的 IPv4 網段，例如 192.168.1.0/24。",
+      "scan_failed": "區域網路掃描無法完成。"
     },
     "abort": {
       "already_configured": "這台大金冷氣已經設定過了。",
-      "reconfigure_successful": "大金冷氣設定已更新。"
+      "reconfigure_successful": "大金冷氣設定已更新。",
+      "no_new_devices": "找不到新的大金冷氣。",
+      "scan_complete": "已新增掃描到的大金冷氣。"
     }
   }
 }

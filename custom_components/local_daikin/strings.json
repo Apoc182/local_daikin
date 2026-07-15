@@ -1,6 +1,16 @@
 {
   "title": "Local Daikin",
   "config": {
+    "menu": {
+      "user": {
+        "title": "Configure Local Daikin",
+        "description": "Choose how to add your Daikin air conditioners.",
+        "menu_options": {
+          "manual": "Enter an IP address",
+          "scan": "Scan the local network"
+        }
+      }
+    },
     "step": {
       "user": {
         "title": "Add Daikin air conditioner",
@@ -15,14 +25,25 @@
         "data": {
           "ip_address": "IP address"
         }
+      },
+      "scan": {
+        "title": "Scan local network",
+        "description": "Scan the selected IPv4 network for Daikin LAN adapters and add new devices.",
+        "data": {
+          "network": "IPv4 network"
+        }
       }
     },
     "error": {
-      "invalid_ip": "Enter a valid IPv4 or IPv6 address."
+      "invalid_ip": "Enter a valid IPv4 or IPv6 address.",
+      "invalid_network": "Enter a valid IPv4 network, such as 192.168.1.0/24.",
+      "scan_failed": "The network scan could not be completed."
     },
     "abort": {
       "already_configured": "This Daikin device is already configured.",
-      "reconfigure_successful": "Daikin configuration updated."
+      "reconfigure_successful": "Daikin configuration updated.",
+      "no_new_devices": "No new Daikin devices were found.",
+      "scan_complete": "The discovered Daikin devices were added."
     }
   }
 }

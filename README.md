@@ -21,6 +21,13 @@ Local Daikin integration from **Settings → Devices & Services**, open the
 entry menu, and choose **Reconfigure** to update an adapter IP without editing
 Home Assistant storage files or removing the integration.
 
+To discover multiple adapters at once, choose **Add Integration → Local
+Daikin → Scan the local network**. The scan defaults to the Home Assistant
+host's local `/24` network, verifies each candidate with the Daikin DSIOT API,
+and adds only devices that are not already configured. A custom IPv4 network
+such as `192.168.31.0/24` can be entered when the default network is not
+available.
+
 ## Features
 
 - Full climate control (temperature, HVAC mode, fan, swing)
