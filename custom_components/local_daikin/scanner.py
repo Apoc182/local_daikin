@@ -9,10 +9,10 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from aiohttp import ClientError, ClientTimeout
+import requests
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
+from requests.exceptions import RequestException
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ MAX_SCAN_ADDRESSES = 1024
 SCAN_CONCURRENCY = 8
 # Some Daikin adapters need more than a second to answer after an ARP lookup.
 # Keep enough parallelism for a /24 scan while allowing slow LAN adapters through.
-REQUEST_TIMEOUT = ClientTimeout(total=4.0, connect=2.0, sock_read=2.0)
+REQUEST_TIMEOUT = (2.0, 2.0)
 
 
 class DaikinConnectionError(Exception):
@@ -134,42 +134,48 @@ def _parse_device_info(ip: str, data: object) -> DaikinDeviceInfo:
     return DaikinDeviceInfo(ip=ip, mac=mac)
 
 
-async def _async_fetch_device_info(session, ip: str) -> DaikinDeviceInfo:
-    """Fetch a Daikin adapter identity with an existing HTTP session."""
+def _fetch_device_info(ip: str) -> DaikinDeviceInfo:
+    """Fetch a Daikin identity with the transport used by its control API."""
     try:
-        async with session.post(
+        response = requests.post(
             f"http://{ip}{DISCOVERY_PATH}",
             json=DISCOVERY_PAYLOAD,
             timeout=REQUEST_TIMEOUT,
-        ) as response:
-            if response.status != 200:
-                raise DaikinConnectionError(
-                    f"The device returned HTTP status {response.status}"
-                )
-            data = await response.json(content_type=None)
+        )
+        if response.status_code != 200:
+            raise DaikinConnectionError(
+                f"The device returned HTTP status {response.status_code}"
+            )
+        data = response.json()
     except DaikinConnectionError:
         raise
-    except (TimeoutError, ClientError, OSError, ValueError) as err:
+    except (RequestException, OSError, ValueError) as err:
         raise DaikinConnectionError("Unable to connect to the Daikin adapter") from err
 
     return _parse_device_info(ip, data)
+
+
+async def _async_fetch_device_info(
+    hass: HomeAssistant, ip: str
+) -> DaikinDeviceInfo:
+    """Fetch one adapter without blocking Home Assistant's event loop."""
+    return await hass.async_add_executor_job(_fetch_device_info, ip)
 
 
 async def async_get_device_info(
     hass: HomeAssistant, ip: str
 ) -> DaikinDeviceInfo:
     """Validate one address and return its stable adapter identity."""
-    session = async_get_clientsession(hass)
-    return await _async_fetch_device_info(session, ip)
+    return await _async_fetch_device_info(hass, ip)
 
 
 async def _probe_ip(
-    session, ip: str, semaphore: asyncio.Semaphore
+    hass: HomeAssistant, ip: str, semaphore: asyncio.Semaphore
 ) -> DaikinDeviceInfo | None:
     """Probe one address and return its identity when it is a Daikin adapter."""
     async with semaphore:
         try:
-            return await _async_fetch_device_info(session, ip)
+            return await _async_fetch_device_info(hass, ip)
         except DaikinConnectionError as err:
             _LOGGER.debug("Daikin discovery probe failed for %s: %s", ip, err)
             return None
@@ -179,11 +185,10 @@ async def async_scan_network(
     hass: HomeAssistant, network: ipaddress.IPv4Network
 ) -> list[DaikinDeviceInfo]:
     """Scan an IPv4 network for Daikin LAN adapters."""
-    session = async_get_clientsession(hass)
     semaphore = asyncio.Semaphore(SCAN_CONCURRENCY)
     addresses: Iterable[ipaddress.IPv4Address] = network.hosts()
     results = await asyncio.gather(
-        *(_probe_ip(session, str(ip), semaphore) for ip in addresses)
+        *(_probe_ip(hass, str(ip), semaphore) for ip in addresses)
     )
     found = sorted(
         (device for device in results if device is not None),

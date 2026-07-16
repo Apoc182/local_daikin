@@ -119,85 +119,84 @@ def test_legacy_unique_id_detection(
 
 
 class FakeResponse:
-    """Minimal aiohttp response context manager for request tests."""
+    """Minimal requests response for transport tests."""
 
     def __init__(self, status: int, data: object) -> None:
-        self.status = status
+        self.status_code = status
         self._data = data
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, traceback) -> None:
-        return None
-
-    async def json(self, content_type=None) -> object:
+    def json(self) -> object:
         return self._data
 
 
-class FakeSession:
-    """Minimal aiohttp session for request tests."""
+class FakeHass:
+    """Run executor jobs immediately while preserving the async API."""
 
-    def __init__(self, response: FakeResponse) -> None:
-        self.response = response
-
-    def post(self, *args, **kwargs) -> FakeResponse:
-        return self.response
+    async def async_add_executor_job(self, target, *args):
+        return target(*args)
 
 
 async def test_fetch_device_info_validates_http_response() -> None:
     """The probe returns identity only after a successful DSIOT response."""
-    device = await _async_fetch_device_info(
-        FakeSession(FakeResponse(200, daikin_response())), "192.168.31.71"
-    )
+    hass = FakeHass()
+    with patch(
+        "custom_components.local_daikin.scanner.requests.post",
+        return_value=FakeResponse(200, daikin_response()),
+    ):
+        device = await _async_fetch_device_info(hass, "192.168.31.71")
     assert device.mac == format_mac("AABBCCDDEEFF")
 
-    with pytest.raises(DaikinConnectionError):
-        await _async_fetch_device_info(
-            FakeSession(FakeResponse(404, {})), "192.168.31.72"
-        )
+    with (
+        patch(
+            "custom_components.local_daikin.scanner.requests.post",
+            return_value=FakeResponse(404, {}),
+        ),
+        pytest.raises(DaikinConnectionError),
+    ):
+        await _async_fetch_device_info(hass, "192.168.31.72")
 
 
 def test_discovery_timeout_allows_slow_lan_adapters() -> None:
     """Discovery tolerates adapters delayed by ARP and Wi-Fi wake-up."""
     assert SCAN_CONCURRENCY == 8
-    assert REQUEST_TIMEOUT.total == 4.0
-    assert REQUEST_TIMEOUT.connect == 2.0
-    assert REQUEST_TIMEOUT.sock_read == 2.0
+    assert REQUEST_TIMEOUT == (2.0, 2.0)
 
 
 async def test_fetch_device_info_maps_network_errors() -> None:
     """Expected transport failures become a config-flow connection error."""
-
-    class BrokenSession:
-        def post(self, *args, **kwargs):
-            raise OSError("offline")
-
-    with pytest.raises(DaikinConnectionError):
-        await _async_fetch_device_info(BrokenSession(), "192.168.31.71")
+    with (
+        patch(
+            "custom_components.local_daikin.scanner.requests.post",
+            side_effect=OSError("offline"),
+        ),
+        pytest.raises(DaikinConnectionError),
+    ):
+        await _async_fetch_device_info(FakeHass(), "192.168.31.71")
 
 
 async def test_public_probe_helpers_share_validation() -> None:
     """Manual validation and scan probes use the same response parser."""
-    session = FakeSession(FakeResponse(200, daikin_response()))
+    hass = FakeHass()
     with patch(
-        "custom_components.local_daikin.scanner.async_get_clientsession",
-        return_value=session,
+        "custom_components.local_daikin.scanner.requests.post",
+        return_value=FakeResponse(200, daikin_response()),
     ):
-        device = await async_get_device_info(object(), "192.168.31.71")
+        device = await async_get_device_info(hass, "192.168.31.71")
+        assert await _probe_ip(
+            hass, "192.168.31.71", asyncio.Semaphore(1)
+        ) == device
     assert device.mac == format_mac("AABBCCDDEEFF")
 
-    assert await _probe_ip(
-        session, "192.168.31.71", asyncio.Semaphore(1)
-    ) == device
-    assert (
-        await _probe_ip(
-            FakeSession(FakeResponse(404, {})),
-            "192.168.31.72",
-            asyncio.Semaphore(1),
+    with patch(
+        "custom_components.local_daikin.scanner.requests.post",
+        return_value=FakeResponse(404, {}),
+    ):
+        assert (
+            await _probe_ip(
+                hass, "192.168.31.72", asyncio.Semaphore(1)
+            )
+            is None
         )
-        is None
-    )
 
 
 async def test_scan_returns_devices_in_numeric_ip_order() -> None:
@@ -209,18 +208,12 @@ async def test_scan_returns_devices_in_numeric_ip_order() -> None:
         ),
     }
 
-    async def probe(_session, ip: str, _semaphore):
+    async def probe(_hass, ip: str, _semaphore):
         return devices.get(ip)
 
-    with (
-        patch(
-            "custom_components.local_daikin.scanner.async_get_clientsession",
-            return_value=object(),
-        ),
-        patch(
-            "custom_components.local_daikin.scanner._probe_ip",
-            new=AsyncMock(side_effect=probe),
-        ),
+    with patch(
+        "custom_components.local_daikin.scanner._probe_ip",
+        new=AsyncMock(side_effect=probe),
     ):
         result = await async_scan_network(
             object(), ipaddress.ip_network("192.168.31.0/30")
