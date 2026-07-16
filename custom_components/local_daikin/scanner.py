@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import re
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 
-import requests
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import format_mac
-from requests.exceptions import RequestException
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +25,8 @@ MAX_SCAN_ADDRESSES = 1024
 SCAN_CONCURRENCY = 8
 # Some Daikin adapters need more than a second to answer after an ARP lookup.
 # Keep enough parallelism for a /24 scan while allowing slow LAN adapters through.
-REQUEST_TIMEOUT = (2.0, 2.0)
+CONNECT_TIMEOUT = 2.0
+READ_TIMEOUT = 2.0
 
 
 class DaikinConnectionError(Exception):
@@ -134,32 +135,71 @@ def _parse_device_info(ip: str, data: object) -> DaikinDeviceInfo:
     return DaikinDeviceInfo(ip=ip, mac=mac)
 
 
-def _fetch_device_info(ip: str) -> DaikinDeviceInfo:
-    """Fetch a Daikin identity with the transport used by its control API."""
+async def _async_request_device_info(ip: str) -> object:
+    """Send a bounded HTTP request compatible with Daikin's minimal server."""
+    writer: asyncio.StreamWriter | None = None
     try:
-        response = requests.post(
-            f"http://{ip}{DISCOVERY_PATH}",
-            json=DISCOVERY_PAYLOAD,
-            timeout=REQUEST_TIMEOUT,
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, 80), timeout=CONNECT_TIMEOUT
         )
-        if response.status_code != 200:
+        body = json.dumps(DISCOVERY_PAYLOAD, separators=(",", ":")).encode()
+        request = (
+            f"POST {DISCOVERY_PATH} HTTP/1.1\r\n"
+            f"Host: {ip}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode() + body
+        writer.write(request)
+        await asyncio.wait_for(writer.drain(), timeout=READ_TIMEOUT)
+
+        header_data = await asyncio.wait_for(
+            reader.readuntil(b"\r\n\r\n"), timeout=READ_TIMEOUT
+        )
+        header_lines = header_data.decode("iso-8859-1").split("\r\n")
+        status_parts = header_lines[0].split(" ", 2)
+        if len(status_parts) < 2 or status_parts[1] != "200":
+            status = status_parts[1] if len(status_parts) >= 2 else "invalid"
             raise DaikinConnectionError(
-                f"The device returned HTTP status {response.status_code}"
+                f"The device returned HTTP status {status}"
             )
-        data = response.json()
+
+        headers = {
+            name.strip().lower(): value.strip()
+            for line in header_lines[1:]
+            if ":" in line
+            for name, value in [line.split(":", 1)]
+        }
+        content_length = int(headers.get("content-length", "0"))
+        if content_length <= 0:
+            raise DaikinConnectionError("The device returned an empty response")
+        response_body = await asyncio.wait_for(
+            reader.readexactly(content_length), timeout=READ_TIMEOUT
+        )
+        return json.loads(response_body)
     except DaikinConnectionError:
         raise
-    except (RequestException, OSError, ValueError) as err:
+    except (
+        TimeoutError,
+        OSError,
+        ValueError,
+        asyncio.IncompleteReadError,
+        asyncio.LimitOverrunError,
+    ) as err:
         raise DaikinConnectionError("Unable to connect to the Daikin adapter") from err
-
-    return _parse_device_info(ip, data)
+    finally:
+        if writer is not None:
+            writer.close()
+            with suppress(Exception):
+                await writer.wait_closed()
 
 
 async def _async_fetch_device_info(
     hass: HomeAssistant, ip: str
 ) -> DaikinDeviceInfo:
-    """Fetch one adapter without blocking Home Assistant's event loop."""
-    return await hass.async_add_executor_job(_fetch_device_info, ip)
+    """Fetch and parse one adapter identity."""
+    del hass
+    return _parse_device_info(ip, await _async_request_device_info(ip))
 
 
 async def async_get_device_info(

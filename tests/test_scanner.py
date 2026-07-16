@@ -9,11 +9,13 @@ import pytest
 from homeassistant.helpers.device_registry import format_mac
 
 from custom_components.local_daikin.scanner import (
-    REQUEST_TIMEOUT,
+    CONNECT_TIMEOUT,
+    READ_TIMEOUT,
     SCAN_CONCURRENCY,
     DaikinConnectionError,
     DaikinDeviceInfo,
     _async_fetch_device_info,
+    _async_request_device_info,
     _find_pn_value,
     _parse_device_info,
     _probe_ip,
@@ -118,68 +120,99 @@ def test_legacy_unique_id_detection(
     assert uses_legacy_unique_id(unique_id) is expected
 
 
-class FakeResponse:
-    """Minimal requests response for transport tests."""
+class FakeReader:
+    """Minimal stream reader for Daikin HTTP transport tests."""
 
     def __init__(self, status: int, data: object) -> None:
-        self.status_code = status
-        self._data = data
+        import json
 
-    def json(self) -> object:
-        return self._data
+        self.body = json.dumps(data).encode()
+        self.headers = (
+            f"HTTP/1.1 {status} Test\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(self.body)}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode()
+
+    async def readuntil(self, separator: bytes) -> bytes:
+        assert separator == b"\r\n\r\n"
+        return self.headers
+
+    async def readexactly(self, size: int) -> bytes:
+        assert size == len(self.body)
+        return self.body
 
 
-class FakeHass:
-    """Run executor jobs immediately while preserving the async API."""
+class FakeWriter:
+    """Minimal stream writer that captures the outgoing HTTP request."""
 
-    async def async_add_executor_job(self, target, *args):
-        return target(*args)
+    def __init__(self) -> None:
+        self.request = b""
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.request += data
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
 
 
 async def test_fetch_device_info_validates_http_response() -> None:
     """The probe returns identity only after a successful DSIOT response."""
-    hass = FakeHass()
+    writer = FakeWriter()
     with patch(
-        "custom_components.local_daikin.scanner.requests.post",
-        return_value=FakeResponse(200, daikin_response()),
+        "custom_components.local_daikin.scanner.asyncio.open_connection",
+        new=AsyncMock(return_value=(FakeReader(200, daikin_response()), writer)),
     ):
-        device = await _async_fetch_device_info(hass, "192.168.31.71")
+        device = await _async_fetch_device_info(object(), "192.168.31.71")
     assert device.mac == format_mac("AABBCCDDEEFF")
+    assert b"POST /dsiot/multireq HTTP/1.1" in writer.request
+    assert b"Connection: close" in writer.request
+    assert writer.closed
 
     with (
         patch(
-            "custom_components.local_daikin.scanner.requests.post",
-            return_value=FakeResponse(404, {}),
+            "custom_components.local_daikin.scanner.asyncio.open_connection",
+            new=AsyncMock(return_value=(FakeReader(404, {}), FakeWriter())),
         ),
         pytest.raises(DaikinConnectionError),
     ):
-        await _async_fetch_device_info(hass, "192.168.31.72")
+        await _async_request_device_info("192.168.31.72")
 
 
 def test_discovery_timeout_allows_slow_lan_adapters() -> None:
     """Discovery tolerates adapters delayed by ARP and Wi-Fi wake-up."""
     assert SCAN_CONCURRENCY == 8
-    assert REQUEST_TIMEOUT == (2.0, 2.0)
+    assert CONNECT_TIMEOUT == 2.0
+    assert READ_TIMEOUT == 2.0
 
 
 async def test_fetch_device_info_maps_network_errors() -> None:
     """Expected transport failures become a config-flow connection error."""
     with (
         patch(
-            "custom_components.local_daikin.scanner.requests.post",
+            "custom_components.local_daikin.scanner.asyncio.open_connection",
+            new=AsyncMock(
             side_effect=OSError("offline"),
+            ),
         ),
         pytest.raises(DaikinConnectionError),
     ):
-        await _async_fetch_device_info(FakeHass(), "192.168.31.71")
+        await _async_request_device_info("192.168.31.71")
 
 
 async def test_public_probe_helpers_share_validation() -> None:
     """Manual validation and scan probes use the same response parser."""
-    hass = FakeHass()
+    hass = object()
     with patch(
-        "custom_components.local_daikin.scanner.requests.post",
-        return_value=FakeResponse(200, daikin_response()),
+        "custom_components.local_daikin.scanner._async_request_device_info",
+        new=AsyncMock(return_value=daikin_response()),
     ):
         device = await async_get_device_info(hass, "192.168.31.71")
         assert await _probe_ip(
@@ -188,8 +221,8 @@ async def test_public_probe_helpers_share_validation() -> None:
     assert device.mac == format_mac("AABBCCDDEEFF")
 
     with patch(
-        "custom_components.local_daikin.scanner.requests.post",
-        return_value=FakeResponse(404, {}),
+        "custom_components.local_daikin.scanner._async_request_device_info",
+        new=AsyncMock(side_effect=DaikinConnectionError("offline")),
     ):
         assert (
             await _probe_ip(
