@@ -32,17 +32,15 @@ MAC = "aa:bb:cc:dd:ee:ff"
 
 
 def daikin_response(raw_mac: str = "AABBCCDDEEFF") -> dict:
-    """Build the adapter identity response used by Daikin devices."""
+    """Build the adapter identity response returned by real Daikin devices."""
     return {
         "responses": [
             {
                 "fr": "/dsiot/edge.adp_i",
-                "pc": [
-                    {
-                        "pn": "adp_i",
-                        "pch": [{"pn": "mac", "pv": raw_mac}],
-                    }
-                ],
+                "pc": {
+                    "pn": "adp_i",
+                    "pch": [{"pn": "mac", "pv": raw_mac}],
+                },
             }
         ]
     }
@@ -109,6 +107,18 @@ def test_find_pn_value_handles_malformed_trees() -> None:
     assert _find_pn_value([{}]) is None
     assert _find_pn_value([{"pn": "other"}], "adp_i") is None
     assert _find_pn_value([{"pn": "adp_i", "pch": {}}], "adp_i", "mac") is None
+
+
+def test_find_pn_value_accepts_list_wrapped_root() -> None:
+    """Older fixtures with a list-wrapped root remain supported."""
+    nodes = [
+        {
+            "pn": "adp_i",
+            "pch": [{"pn": "mac", "pv": "AABBCCDDEEFF"}],
+        }
+    ]
+
+    assert _find_pn_value(nodes, "adp_i", "mac") == "AABBCCDDEEFF"
 
 
 @pytest.mark.parametrize(

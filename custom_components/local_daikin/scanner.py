@@ -83,15 +83,19 @@ def parse_network(value: str) -> ipaddress.IPv4Network:
 
 def _find_pn_value(nodes: object, *keys: str) -> object | None:
     """Find a value in Daikin's nested pn/pv/pch response structure."""
-    if not isinstance(nodes, list):
-        return None
-
     current_nodes = nodes
     for index, key in enumerate(keys):
+        if isinstance(current_nodes, dict):
+            candidates = [current_nodes]
+        elif isinstance(current_nodes, list):
+            candidates = current_nodes
+        else:
+            return None
+
         node = next(
             (
                 candidate
-                for candidate in current_nodes
+                for candidate in candidates
                 if isinstance(candidate, dict) and candidate.get("pn") == key
             ),
             None,
@@ -100,10 +104,7 @@ def _find_pn_value(nodes: object, *keys: str) -> object | None:
             return None
         if index == len(keys) - 1:
             return node.get("pv")
-        children = node.get("pch")
-        if not isinstance(children, list):
-            return None
-        current_nodes = children
+        current_nodes = node.get("pch")
     return None
 
 
