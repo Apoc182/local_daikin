@@ -28,6 +28,7 @@ SCAN_CONCURRENCY = 8
 CONNECT_TIMEOUT = 2.0
 READ_TIMEOUT = 2.0
 CLOSE_TIMEOUT = 0.5
+PROBE_TIMEOUT = 6.0
 
 
 class DaikinConnectionError(Exception):
@@ -140,9 +141,11 @@ async def _async_request_device_info(ip: str) -> object:
     """Send a bounded HTTP request compatible with Daikin's minimal server."""
     writer: asyncio.StreamWriter | None = None
     try:
+        _LOGGER.debug("Opening Daikin discovery connection to %s", ip)
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(ip, 80), timeout=CONNECT_TIMEOUT
         )
+        _LOGGER.debug("Connected to Daikin discovery address %s", ip)
         body = json.dumps(DISCOVERY_PAYLOAD, separators=(",", ":")).encode()
         request = (
             f"POST {DISCOVERY_PATH} HTTP/1.1\r\n"
@@ -157,6 +160,7 @@ async def _async_request_device_info(ip: str) -> object:
         header_data = await asyncio.wait_for(
             reader.readuntil(b"\r\n\r\n"), timeout=READ_TIMEOUT
         )
+        _LOGGER.debug("Received Daikin discovery headers from %s", ip)
         header_lines = header_data.decode("iso-8859-1").split("\r\n")
         status_parts = header_lines[0].split(" ", 2)
         if len(status_parts) < 2 or status_parts[1] != "200":
@@ -177,6 +181,7 @@ async def _async_request_device_info(ip: str) -> object:
         response_body = await asyncio.wait_for(
             reader.readexactly(content_length), timeout=READ_TIMEOUT
         )
+        _LOGGER.debug("Received Daikin discovery body from %s", ip)
         return json.loads(response_body)
     except DaikinConnectionError:
         raise
@@ -202,7 +207,14 @@ async def _async_fetch_device_info(
 ) -> DaikinDeviceInfo:
     """Fetch and parse one adapter identity."""
     del hass
-    return _parse_device_info(ip, await _async_request_device_info(ip))
+    try:
+        async with asyncio.timeout(PROBE_TIMEOUT):
+            data = await _async_request_device_info(ip)
+    except TimeoutError as err:
+        raise DaikinConnectionError(
+            "Timed out while connecting to the Daikin adapter"
+        ) from err
+    return _parse_device_info(ip, data)
 
 
 async def async_get_device_info(

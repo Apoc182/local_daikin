@@ -11,6 +11,7 @@ from homeassistant.helpers.device_registry import format_mac
 from custom_components.local_daikin.scanner import (
     CLOSE_TIMEOUT,
     CONNECT_TIMEOUT,
+    PROBE_TIMEOUT,
     READ_TIMEOUT,
     SCAN_CONCURRENCY,
     DaikinConnectionError,
@@ -193,6 +194,7 @@ def test_discovery_timeout_allows_slow_lan_adapters() -> None:
     assert CONNECT_TIMEOUT == 2.0
     assert READ_TIMEOUT == 2.0
     assert CLOSE_TIMEOUT == 0.5
+    assert PROBE_TIMEOUT == 6.0
 
 
 async def test_fetch_device_info_maps_network_errors() -> None:
