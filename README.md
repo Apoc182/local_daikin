@@ -24,9 +24,15 @@ Home Assistant storage files or removing the integration.
 To discover multiple adapters at once, choose **Add Integration → Local
 Daikin → Scan the local network**. The scan defaults to the Home Assistant
 host's local `/24` network, verifies each candidate with the Daikin DSIOT API,
-and adds only devices that are not already configured. A custom IPv4 network
-such as `192.168.31.0/24` can be entered when the default network is not
-available.
+and adds only devices that are not already configured. The result reports
+partial failures instead of treating one successful device as a complete
+scan. A custom IPv4 network such as `192.168.31.0/24` can be entered when the
+default network is not available.
+
+Manual setup and reconfiguration also verify the DSIOT endpoint before saving.
+The integration uses the adapter MAC address as the stable config entry ID and
+gradually migrates older IP-based entries whenever the adapter is reachable.
+Only IPv4 is currently supported by the integration.
 
 The configuration pages are available in English and Traditional Chinese and
 follow the language selected for the Home Assistant user account. This covers

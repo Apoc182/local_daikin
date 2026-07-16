@@ -4,22 +4,45 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
-from homeassistant import config_entries
-from homeassistant.config_entries import SOURCE_USER
 import voluptuous as vol
+from homeassistant import config_entries
+from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY
+from homeassistant.data_entry_flow import FlowResultType, UnknownFlow
 
 from .const import CONF_IP_ADDRESS, DOMAIN
-from .scanner import async_scan_network, get_default_network, parse_network
+from .scanner import (
+    DaikinConnectionError,
+    DaikinDeviceInfo,
+    async_get_device_info,
+    async_scan_network,
+    get_default_network,
+    parse_network,
+    uses_legacy_unique_id,
+)
 
 CONF_NETWORK = "network"
 _LOGGER = logging.getLogger(__name__)
 
 
 def _normalise_ip(value: str) -> str:
-    """Return a canonical IP address or raise ValueError."""
-    return str(ipaddress.ip_address(value.strip()))
+    """Return a canonical IPv4 address or raise ValueError."""
+    address = ipaddress.ip_address(value.strip())
+    if address.version != 4:
+        raise ValueError("Only IPv4 addresses are supported")
+    return str(address)
+
+
+@dataclass(frozen=True, slots=True)
+class AddEntriesResult:
+    """Results from adding all devices found by one network scan."""
+
+    added: tuple[str, ...]
+    skipped: tuple[str, ...]
+    failed: tuple[str, ...]
 
 
 def _schema(default: str | None = None) -> vol.Schema:
@@ -59,13 +82,13 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if self._is_ip_configured(ip):
                     return self.async_abort(reason="already_configured")
 
-                # Keep the existing IP-based unique ID for compatibility with
-                # entries created by earlier releases of this integration.
-                await self.async_set_unique_id(ip)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=f"Daikin {ip}", data={CONF_IP_ADDRESS: ip}
-                )
+                device = await self._async_validate_device(ip, errors)
+                if device is not None:
+                    await self.async_set_unique_id(device.mac)
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=f"Daikin {ip}", data={CONF_IP_ADDRESS: ip}
+                    )
 
         return self.async_show_form(
             step_id="manual",
@@ -78,6 +101,7 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Scan the local network and add every new Daikin adapter."""
         errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] | None = None
         default_network = get_default_network(self.hass) or ""
 
         if user_input is not None:
@@ -95,18 +119,37 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if not discovered:
                         return self.async_abort(reason="no_devices_found")
 
-                    new_ips = [
-                        ip
-                        for ip in discovered
-                        if not self._is_ip_configured(ip)
+                    new_devices = [
+                        device
+                        for device in discovered
+                        if not self._is_ip_configured(device.ip)
+                        and not self._is_unique_id_configured(device.mac)
                     ]
-                    if not new_ips:
+                    if not new_devices:
                         return self.async_abort(reason="all_configured")
 
-                    added = await self._async_add_entries(new_ips)
-                    if added:
-                        return self.async_abort(reason="scan_complete")
-                    errors["base"] = "scan_failed"
+                    result = await self._async_add_entries(new_devices)
+                    placeholders = {
+                        "added": str(len(result.added)),
+                        "skipped": str(len(result.skipped)),
+                        "failed": str(len(result.failed)),
+                        "failed_ips": ", ".join(result.failed) or "-",
+                    }
+                    if result.failed and result.added:
+                        return self.async_abort(
+                            reason="scan_partial",
+                            description_placeholders=placeholders,
+                        )
+                    if result.failed:
+                        errors["base"] = "scan_add_failed"
+                        description_placeholders = placeholders
+                    elif result.added:
+                        return self.async_abort(
+                            reason="scan_complete",
+                            description_placeholders=placeholders,
+                        )
+                    else:
+                        return self.async_abort(reason="all_configured")
 
         return self.async_show_form(
             step_id="scan",
@@ -114,34 +157,65 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {vol.Required(CONF_NETWORK, default=default_network): str}
             ),
             errors=errors,
+            description_placeholders=description_placeholders,
         )
 
-    async def _async_add_entries(self, ips: list[str]) -> bool:
+    async def async_step_integration_discovery(
+        self, discovery_info: dict[str, str]
+    ) -> config_entries.ConfigFlowResult:
+        """Add one adapter that was already verified by a network scan."""
+        ip = _normalise_ip(discovery_info[CONF_IP_ADDRESS])
+        mac = discovery_info["mac"]
+
+        if self._is_ip_configured(ip):
+            return self.async_abort(reason="already_configured")
+
+        await self.async_set_unique_id(mac)
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(
+            title=f"Daikin {ip}", data={CONF_IP_ADDRESS: ip}
+        )
+
+    async def _async_add_entries(
+        self, devices: list[DaikinDeviceInfo]
+    ) -> AddEntriesResult:
         """Run the normal manual config flow for each discovered IP."""
-        added = False
-        for ip in ips:
-            flow = await self.hass.config_entries.flow.async_init(
-                DOMAIN,
-                context={"source": SOURCE_USER},
-            )
-            flow_id = flow.get("flow_id")
-            if not flow_id:
-                continue
+        added: list[str] = []
+        skipped: list[str] = []
+        failed: list[str] = []
 
-            menu_result = await self.hass.config_entries.flow.async_configure(
-                flow_id,
-                {"next_step_id": "manual"},
-            )
-            if not menu_result.get("flow_id"):
-                continue
+        for device in devices:
+            result: config_entries.ConfigFlowResult | None = None
+            try:
+                result = await self.hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context={"source": SOURCE_INTEGRATION_DISCOVERY},
+                    data={CONF_IP_ADDRESS: device.ip, "mac": device.mac},
+                )
+                if result.get("type") == FlowResultType.CREATE_ENTRY:
+                    added.append(device.ip)
+                elif result.get("type") == FlowResultType.ABORT and result.get(
+                    "reason"
+                ) in {"already_configured", "already_in_progress"}:
+                    skipped.append(device.ip)
+                else:
+                    failed.append(device.ip)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception(
+                    "Unable to add discovered Daikin adapter %s", device.ip
+                )
+                failed.append(device.ip)
+            finally:
+                flow_id = result.get("flow_id") if result is not None else None
+                if flow_id is not None:
+                    with suppress(UnknownFlow):
+                        self.hass.config_entries.flow.async_abort(flow_id)
 
-            result = await self.hass.config_entries.flow.async_configure(
-                flow_id,
-                {CONF_IP_ADDRESS: ip},
-            )
-            if result.get("type") == "create_entry":
-                added = True
-        return added
+        return AddEntriesResult(
+            added=tuple(added),
+            skipped=tuple(skipped),
+            failed=tuple(failed),
+        )
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -160,13 +234,19 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if self._is_ip_configured(ip, exclude_entry_id=entry.entry_id):
                     return self.async_abort(reason="already_configured")
 
-                # Older releases used the address as the config entry unique
-                # ID. It must move with the address when a user edits it.
-                self.hass.config_entries.async_update_entry(entry, unique_id=ip)
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data_updates={CONF_IP_ADDRESS: ip},
-                )
+                device = await self._async_validate_device(ip, errors)
+                if device is not None:
+                    await self.async_set_unique_id(device.mac)
+                    if uses_legacy_unique_id(entry.unique_id):
+                        self._abort_if_unique_id_configured()
+                    else:
+                        self._abort_if_unique_id_mismatch(reason="wrong_device")
+
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        unique_id=device.mac,
+                        data_updates={CONF_IP_ADDRESS: ip},
+                    )
 
         return self.async_show_form(
             step_id="reconfigure",
@@ -186,3 +266,25 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             for entry in self.hass.config_entries.async_entries(DOMAIN)
         )
+
+    def _is_unique_id_configured(
+        self, unique_id: str, exclude_entry_id: str | None = None
+    ) -> bool:
+        """Check whether a stable adapter identity already has an entry."""
+        entry = self.hass.config_entries.async_entry_for_domain_unique_id(
+            DOMAIN, unique_id
+        )
+        return entry is not None and entry.entry_id != exclude_entry_id
+
+    async def _async_validate_device(
+        self, ip: str, errors: dict[str, str]
+    ) -> DaikinDeviceInfo | None:
+        """Validate that an address is a reachable supported Daikin adapter."""
+        try:
+            return await async_get_device_info(self.hass, ip)
+        except DaikinConnectionError:
+            errors["base"] = "cannot_connect"
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Unexpected error validating Daikin adapter %s", ip)
+            errors["base"] = "unknown"
+        return None

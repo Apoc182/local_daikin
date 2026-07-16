@@ -32,18 +32,21 @@
       }
     },
     "error": {
-      "invalid_ip": "Enter a valid IPv4 or IPv6 address.",
+      "invalid_ip": "Enter a valid IPv4 address.",
       "invalid_network": "Enter a valid IPv4 network, such as 192.168.1.0/24.",
       "scan_failed": "The network scan could not be completed.",
+      "scan_add_failed": "No Daikin devices could be added. Failed addresses: {failed_ips}.",
       "cannot_connect": "Cannot connect to the device.",
       "unknown": "An unknown error occurred."
     },
     "abort": {
       "already_configured": "This Daikin device is already configured.",
+      "wrong_device": "The new address belongs to a different Daikin device.",
       "reconfigure_successful": "Daikin configuration updated.",
       "no_devices_found": "No Daikin devices were found on the selected network.",
       "all_configured": "All discovered Daikin devices are already configured.",
-      "scan_complete": "The discovered Daikin devices were added."
+      "scan_complete": "Added {added} Daikin device(s); {skipped} were already configured.",
+      "scan_partial": "Added {added} Daikin device(s), skipped {skipped}, and failed to add {failed}: {failed_ips}."
     }
   }
 }
