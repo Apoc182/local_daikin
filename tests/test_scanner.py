@@ -9,6 +9,7 @@ import pytest
 from homeassistant.helpers.device_registry import format_mac
 
 from custom_components.local_daikin.scanner import (
+    REQUEST_TIMEOUT,
     DaikinConnectionError,
     DaikinDeviceInfo,
     _async_fetch_device_info,
@@ -154,6 +155,13 @@ async def test_fetch_device_info_validates_http_response() -> None:
         await _async_fetch_device_info(
             FakeSession(FakeResponse(404, {})), "192.168.31.72"
         )
+
+
+def test_discovery_timeout_allows_slow_lan_adapters() -> None:
+    """Discovery tolerates adapters delayed by ARP and Wi-Fi wake-up."""
+    assert REQUEST_TIMEOUT.total == 4.0
+    assert REQUEST_TIMEOUT.connect == 2.0
+    assert REQUEST_TIMEOUT.sock_read == 2.0
 
 
 async def test_fetch_device_info_maps_network_errors() -> None:

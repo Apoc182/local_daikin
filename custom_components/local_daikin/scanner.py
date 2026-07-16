@@ -22,8 +22,10 @@ DISCOVERY_PAYLOAD = {
 }
 DEFAULT_PREFIX = 24
 MAX_SCAN_ADDRESSES = 1024
-SCAN_CONCURRENCY = 32
-REQUEST_TIMEOUT = ClientTimeout(total=1.5, connect=0.4, sock_read=0.8)
+SCAN_CONCURRENCY = 64
+# Some Daikin adapters need more than a second to answer after an ARP lookup.
+# Keep enough parallelism for a /24 scan while allowing slow LAN adapters through.
+REQUEST_TIMEOUT = ClientTimeout(total=4.0, connect=2.0, sock_read=2.0)
 
 
 class DaikinConnectionError(Exception):
