@@ -1,4 +1,5 @@
 {
+  "title": "Local Daikin",
   "config": {
     "step": {
       "user": {
@@ -13,14 +14,14 @@
         "title": "Add Daikin air conditioner",
         "description": "Enter the IP address of the Daikin LAN adapter.",
         "data": {
-          "ip_address": "IP Address"
+          "ip_address": "IP address"
         }
       },
       "reconfigure": {
         "title": "Reconfigure Daikin air conditioner",
         "description": "Update the IP address of the Daikin LAN adapter.",
         "data": {
-          "ip_address": "IP Address"
+          "ip_address": "IP address"
         }
       },
       "scan": {
