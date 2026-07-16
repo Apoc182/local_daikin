@@ -9,6 +9,7 @@ import pytest
 from homeassistant.helpers.device_registry import format_mac
 
 from custom_components.local_daikin.scanner import (
+    CLOSE_TIMEOUT,
     CONNECT_TIMEOUT,
     READ_TIMEOUT,
     SCAN_CONCURRENCY,
@@ -191,6 +192,7 @@ def test_discovery_timeout_allows_slow_lan_adapters() -> None:
     assert SCAN_CONCURRENCY == 8
     assert CONNECT_TIMEOUT == 2.0
     assert READ_TIMEOUT == 2.0
+    assert CLOSE_TIMEOUT == 0.5
 
 
 async def test_fetch_device_info_maps_network_errors() -> None:

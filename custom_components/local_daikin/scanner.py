@@ -27,6 +27,7 @@ SCAN_CONCURRENCY = 8
 # Keep enough parallelism for a /24 scan while allowing slow LAN adapters through.
 CONNECT_TIMEOUT = 2.0
 READ_TIMEOUT = 2.0
+CLOSE_TIMEOUT = 0.5
 
 
 class DaikinConnectionError(Exception):
@@ -191,7 +192,9 @@ async def _async_request_device_info(ip: str) -> object:
         if writer is not None:
             writer.close()
             with suppress(Exception):
-                await writer.wait_closed()
+                await asyncio.wait_for(
+                    writer.wait_closed(), timeout=CLOSE_TIMEOUT
+                )
 
 
 async def _async_fetch_device_info(
