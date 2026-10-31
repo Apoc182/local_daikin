@@ -450,7 +450,7 @@ class LocalDaikin(ClimateEntity):
         (optimistic updates handle the UI; next poll cycle confirms)."""
         _LOGGER.info(request)
         try:
-            response = requests.put(self.url, json=request, timeout=REQUEST_TIMEOUT).json()
+            response = requests.post(self.url, json=request, timeout=REQUEST_TIMEOUT).json()
         except RequestException as err:
             _LOGGER.error("Daikin %s: failed to send command: %s", self._ip, err)
             raise
