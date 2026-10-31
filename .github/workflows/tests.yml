@@ -1,0 +1,24 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: python -m pip install -r requirements_test.txt
+      - run: >-
+          ruff check
+          custom_components/local_daikin/__init__.py
+          custom_components/local_daikin/config_flow.py
+          custom_components/local_daikin/const.py
+          custom_components/local_daikin/scanner.py
+          tests
+      - run: python -m pytest
