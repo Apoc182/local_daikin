@@ -227,6 +227,8 @@ class LocalDaikin(ClimateEntity):
         self._drying_phase: str | None = None
         self._drying_deadline: float | None = None
         self._drying_step_after: float = 0.0  # earliest time for the next step
+        self._drying_fan_pending: bool = False  # fan Auto still to be written
+        self._drying_restored_unconfirmed: bool = False  # restored, not yet polled
         self._pre_transition_mode: HVACMode = HVACMode.OFF
         self._last_on_timer_minutes: int | None = None  # off timer while last on
         self._off_by_timer: bool = False
@@ -401,17 +403,23 @@ class LocalDaikin(ClimateEntity):
         if deadline is not None:
             self._drying_phase = "drying"
             self._drying_deadline = deadline
+            self._drying_restored_unconfirmed = True
+            self._drying_fan_pending = True
+            self._drying_step_after = 0.0  # the unit has long settled
 
     @property
     def post_off_drying_end(self) -> datetime | None:
-        if self._drying_phase != "drying":
+        # Read once: a cancel on the executor may clear it between two reads.
+        deadline = self._drying_deadline
+        if self._drying_phase != "drying" or deadline is None:
             return None
-        return datetime.fromtimestamp(self._drying_deadline, tz=UTC)
+        return datetime.fromtimestamp(deadline, tz=UTC)
 
     def _cancel_drying(self, reason: str) -> None:
         _LOGGER.info("Daikin %s: post-off drying cancelled (%s)", self._ip, reason)
         self._drying_phase = None
         self._drying_deadline = None
+        self._drying_restored_unconfirmed = False
         self._persist(None)
 
     def _user_takeover(self) -> None:
@@ -431,6 +439,9 @@ class LocalDaikin(ClimateEntity):
         waiting -> drying   after the start delay (last_ope has caught up):
                             fan-only + power on, at the unit's own fan speed;
                             or a failed start the unit applied (reads FAN_ONLY)
+        drying  -> drying   fan Auto, sent on its own after the start delay
+        drying  -> waiting  first poll after a restore finds the unit OFF and
+                            not operated by remote/app: the start never landed
         drying  -> None     at the deadline (power off), or cancelled if the
                             mode changed or the remote/app operated the unit
         """
@@ -463,6 +474,8 @@ class LocalDaikin(ClimateEntity):
                     if hvac == HVACMode.FAN_ONLY:
                         # A start failed (e.g. timed out) but the unit applied it.
                         self._drying_phase = "drying"
+                        self._drying_fan_pending = True
+                        self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
                         return
                     self._cancel_drying(f"mode is {hvac.value}")
                 self._drying_phase = None
@@ -516,6 +529,8 @@ class LocalDaikin(ClimateEntity):
                 return
             self._drying_deadline = deadline
             self._drying_phase = "drying"
+            self._drying_fan_pending = True
+            self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
             self._hvac_mode = HVACMode.FAN_ONLY  # optimistic
             _LOGGER.info(
                 "Daikin %s: post-off drying started (source %s), off in %d min",
@@ -524,6 +539,22 @@ class LocalDaikin(ClimateEntity):
             return
 
         # drying
+        restored = self._drying_restored_unconfirmed
+        self._drying_restored_unconfirmed = False
+        if (
+            restored
+            and hvac == HVACMode.OFF
+            and now < self._drying_deadline
+            and self._last_ope_type in (None, LAST_OPE_LOCAL)
+        ):
+            # Recorded before a restart, but the start never landed: retry it.
+            _LOGGER.info(
+                "Daikin %s: restored drying not running — retrying start", self._ip
+            )
+            self._drying_phase = "waiting"
+            self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
+            return
+
         if hvac != HVACMode.FAN_ONLY:
             self._cancel_drying(f"mode is {hvac.value}")
             self._pre_transition_mode = hvac
@@ -552,6 +583,32 @@ class LocalDaikin(ClimateEntity):
             self._persist(None)
             self._pre_transition_mode = HVACMode.OFF
             self._hvac_mode = HVACMode.OFF  # optimistic
+            return
+
+        if self._drying_fan_pending and now >= self._drying_step_after:
+            # Own request after the start has settled; a local-API write keeps
+            # last_ope at 100, so it is not read as a takeover.
+            try:
+                self._send_attribute(
+                    DaikinRequest(
+                        [
+                            DaikinAttribute(
+                                HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[HVACMode.FAN_ONLY],
+                                FAN_MODE_MAP[HAFanMode.FAN_AUTO],
+                                ["e_1002", "e_3001"],
+                                "/dsiot/edge/adr_0100.dgc_status",
+                            )
+                        ]
+                    ).serialize()
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Daikin %s: post-off drying fan Auto failed, retrying (%s)",
+                    self._ip, err,
+                )
+                return
+            self._drying_fan_pending = False
+            self._fan_mode = HAFanMode.FAN_AUTO  # optimistic
 
     @property
     def temperature_unit(self):

@@ -542,16 +542,160 @@ def test_restore_resumes_and_powers_off_after_deadline():
     assert store.saved[-1] is None
 
 
-def test_restore_discards_when_unit_not_fan_only():
+def test_restore_off_unit_untouched_by_owner_retries_start():
     store = FakeStore()
     entity = _with_store(_entity(), store)
     entity.restore_drying(T0 + 600)
     entity._hvac_mode = HVACMode.OFF
+    entity._last_ope_type = 100
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+        assert entity._drying_phase == "waiting"
+        assert store.saved == []
+        post.assert_not_called()
+        entity._process_post_off_drying(now=T0 + D)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "0000"), ("p_01", "01")]
+    assert entity._drying_phase == "drying"
+    assert entity._drying_deadline == T0 + D + entity._drying_seconds
+    assert store.saved == [T0 + D + entity._drying_seconds]
+
+
+@pytest.mark.parametrize("source", [1, 200])
+def test_restore_off_unit_switched_off_by_owner_cancels(source):
+    store = FakeStore()
+    entity = _with_store(_entity(), store)
+    entity.restore_drying(T0 + 600)
+    entity._hvac_mode = HVACMode.OFF
+    entity._last_ope_type = source
     with patch(POST_PATH, _accepted_post()) as post:
         entity._process_post_off_drying(now=T0)
     assert entity._drying_phase is None
     post.assert_not_called()
     assert store.saved[-1] is None
+
+
+def test_restore_expired_record_with_off_unit_cancels():
+    store = FakeStore()
+    entity = _with_store(_entity(), store)
+    entity.restore_drying(T0 - 1)
+    entity._hvac_mode = HVACMode.OFF
+    entity._last_ope_type = 100
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+    assert entity._drying_phase is None
+    post.assert_not_called()
+    assert store.saved[-1] is None
+
+
+def test_restore_fan_only_still_resumes():
+    entity = _entity()
+    entity.restore_drying(T0 + 600)
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    entity._last_ope_type = 100
+    assert entity._drying_fan_pending
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+    assert entity._drying_phase == "drying"
+    # the unit has long settled: fan Auto is due on the first poll
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_28", "0A00")]
+    assert not entity._drying_fan_pending
+
+
+def test_restore_retry_only_on_first_poll():
+    entity = _entity()
+    entity.restore_drying(T0 + 600)
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    entity._last_ope_type = 100
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0)
+        entity._hvac_mode = HVACMode.OFF  # owner switched off later
+        entity._process_post_off_drying(now=T0 + 60)
+    assert entity._drying_phase is None
+
+
+def _just_started() -> LocalDaikin:
+    """Entity whose fan-only start was accepted at T0."""
+    entity = _off_from(HVACMode.COOL, _last_ope_type=100)
+    entity._drying_phase = "waiting"
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0)
+    assert entity._drying_phase == "drying"
+    assert entity._drying_fan_pending
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    return entity
+
+
+def test_start_request_still_has_no_fan_speed():
+    entity = _off_from(HVACMode.COOL, _last_ope_type=100)
+    entity._drying_phase = "waiting"
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+    post.assert_called_once()
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "0000"), ("p_01", "01")]
+
+
+def test_fan_auto_sent_as_separate_request_after_delay():
+    entity = _just_started()
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + 2)
+        post.assert_not_called()
+        entity._process_post_off_drying(now=T0 + D)
+    post.assert_called_once()
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_28", "0A00")]
+    assert not entity._drying_fan_pending
+    assert entity._drying_phase == "drying"
+    assert entity.fan_mode == "Auto"
+
+
+def test_fan_auto_sent_only_once():
+    entity = _just_started()
+    with patch(POST_PATH, _accepted_post()) as post:
+        for i in range(5):
+            entity._process_post_off_drying(now=T0 + D + i * 60)
+    post.assert_called_once()
+
+
+def test_fan_auto_write_does_not_cancel():
+    entity = _just_started()
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0 + D)
+        entity._last_ope_type = 100  # our own local-API write
+        entity._process_post_off_drying(now=T0 + D + 60)
+    assert entity._drying_phase == "drying"
+
+
+def test_fan_auto_failure_keeps_drying_and_powers_off():
+    entity = _just_started()
+    with patch(POST_PATH, _rejected()):
+        entity._process_post_off_drying(now=T0 + D)
+    assert entity._drying_phase == "drying"
+    assert entity._drying_fan_pending
+    with patch(POST_PATH, _rejected()):
+        entity._process_post_off_drying(now=T0 + D + 60)  # retried, still fails
+    assert entity._drying_fan_pending
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=entity._drying_deadline)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
+    assert entity._drying_phase is None
+
+
+def test_adopted_start_sends_fan_auto():
+    entity = _armed(source=100)
+    with patch(POST_PATH, side_effect=Timeout()):
+        entity._process_post_off_drying(now=T0 + D)
+    entity._hvac_mode = HVACMode.FAN_ONLY  # the unit applied it anyway
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + D + 60)
+        assert entity._drying_fan_pending
+        post.assert_not_called()
+        entity._process_post_off_drying(now=T0 + 2 * D + 60)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_28", "0A00")]
+
+
+def test_drying_end_property_tolerates_cleared_deadline():
+    entity = _drying()
+    entity._drying_deadline = None  # cancelled between the two reads
+    assert entity.post_off_drying_end is None
 
 
 def test_restored_cycle_runs_even_if_option_disabled():
