@@ -1,7 +1,10 @@
 import asyncio
 import logging
 
-from .const import DOMAIN
+from homeassistant.components.climate.const import HVACMode
+
+from .const import CONF_IP_ADDRESS, DOMAIN
+from .drying_store import DryingStore
 from .scanner import (
     DaikinConnectionError,
     async_get_device_info,
@@ -63,3 +66,24 @@ async def async_unload_entry(hass, entry):
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
+
+
+async def async_remove_entry(hass, entry):
+    """Power off a unit left in a post-off drying cycle, then drop the record."""
+    from .climate import LocalDaikin  # deferred: climate imports are heavy
+
+    store = DryingStore(hass, entry.entry_id)
+    try:
+        if await store.async_load() is not None:
+            unit = LocalDaikin(entry.data[CONF_IP_ADDRESS])
+            await hass.async_add_executor_job(unit.update)
+            if unit._hvac_mode == HVACMode.FAN_ONLY:
+                await hass.async_add_executor_job(unit._update_state, False)
+    except Exception:  # noqa: BLE001 - removal must not fail
+        _LOGGER.warning(
+            "Could not power off Local Daikin after removal; "
+            "a drying cycle may still be running",
+            exc_info=True,
+        )
+    finally:
+        await store.async_remove()

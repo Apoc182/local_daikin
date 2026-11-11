@@ -20,6 +20,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 
 from datetime import UTC, datetime, timedelta
 
+from .drying_store import DryingStore
 from .const import (
     CONF_POST_OFF_DRYING,
     CONF_POST_OFF_DRYING_MINUTES,
@@ -167,7 +168,9 @@ class DaikinRequest:
 
 async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]
-    entity = LocalDaikin(ip, options=entry.options)
+    store = DryingStore(hass, entry.entry_id)
+    entity = LocalDaikin(ip, options=entry.options, store=store)
+    entity.restore_drying(await store.async_load())
 
     # Retry initial update with backoff — Daikin units can be slow after HA reboot
     import asyncio
