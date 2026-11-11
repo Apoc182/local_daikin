@@ -246,7 +246,7 @@ def test_rejected_write_keeps_cached_state():
     import pytest
 
     entity = LocalDaikin(IP)
-    with patch(POST_PATH, _rejected_post()), pytest.raises(Exception):
+    with patch(POST_PATH, _rejected_post()), pytest.raises(Exception, match="occured"):
         entity.set_feature("comfort", True)
     assert entity.extra_state_attributes["comfort"] is None
 
@@ -257,7 +257,7 @@ def test_rejected_write_keeps_exclusive_state():
 
     entity = LocalDaikin(IP)
     entity._features["powerful"] = "on"
-    with patch(POST_PATH, _rejected_post()), pytest.raises(Exception):
+    with patch(POST_PATH, _rejected_post()), pytest.raises(Exception, match="occured"):
         entity.set_feature("econo", True)
     assert entity.extra_state_attributes["powerful"] == "on"
     assert entity.extra_state_attributes["econo"] is None
@@ -275,5 +275,34 @@ def test_missing_feature_nodes_do_not_log_warnings(caplog):
     with caplog.at_level(logging.WARNING):
         _entity_with_features(response)
     feature_pns = {pn for _, _, pn in FEATURE_MAP.values()}
-    noisy = [r for r in caplog.records if any(pn in r.getMessage() for pn in feature_pns)]
+    noisy = [
+        r for r in caplog.records if any(pn in r.getMessage() for pn in feature_pns)
+    ]
     assert noisy == []
+
+
+async def test_turning_on_feature_refreshes_exclusive_switches():
+    """Enabling Econo clears Powerful on the unit; the Powerful switch must
+    refresh right away instead of showing On until the next poll."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from custom_components.local_daikin import switch as switch_module
+
+    climate = LocalDaikin(IP)
+    climate._features["powerful"] = "on"
+    hass = _fake_hass(climate)
+    entry = SimpleNamespace(entry_id="entry-1", data={"ip_address": IP})
+    added = []
+    await switch_module.async_setup_entry(hass, entry, added.extend)
+    by_type = {type(e): e for e in added}
+    for entity in added:
+        entity.hass = hass
+        entity.schedule_update_ha_state = MagicMock()
+
+    with patch(POST_PATH, _accepted_post()):
+        by_type[DaikinEconoSwitch].turn_on()
+
+    by_type[DaikinPowerfulSwitch].schedule_update_ha_state.assert_called_once_with(
+        force_refresh=True
+    )

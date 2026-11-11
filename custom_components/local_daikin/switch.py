@@ -9,13 +9,21 @@ SCAN_INTERVAL = timedelta(seconds=60)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     _LOGGER.info("Setting up Daikin switches for %s", entry.data["ip_address"])
+    features = [
+        cls(hass, entry.entry_id, entry.data["ip_address"])
+        for cls in (
+            DaikinComfortSwitch,
+            DaikinEconoSwitch,
+            DaikinOutdoorQuietSwitch,
+            DaikinPowerfulSwitch,
+        )
+    ]
+    for feature_switch in features:
+        feature_switch._group = features
     async_add_entities([
         DaikinPowerSwitch(hass, entry.entry_id, entry.data["ip_address"]),
         DaikinQuietFanSwitch(hass, entry.entry_id, entry.data["ip_address"]),
-        DaikinComfortSwitch(hass, entry.entry_id, entry.data["ip_address"]),
-        DaikinEconoSwitch(hass, entry.entry_id, entry.data["ip_address"]),
-        DaikinOutdoorQuietSwitch(hass, entry.entry_id, entry.data["ip_address"]),
-        DaikinPowerfulSwitch(hass, entry.entry_id, entry.data["ip_address"]),
+        *features,
     ])
 
 
@@ -92,6 +100,7 @@ class DaikinFeatureSwitch(SwitchEntity):
         self._attr_name = f"Daikin {self.name_suffix} ({ip})"
         self._attr_unique_id = f"daikin_{self.unique_id_suffix}_{ip}"
         self._attr_should_poll = True
+        self._group = ()  # all feature switches of this unit, set at setup
 
     def _get_climate_entity(self):
         data = self._hass.data.get("local_daikin", {}).get(self._entry_id, {})
@@ -120,6 +129,10 @@ class DaikinFeatureSwitch(SwitchEntity):
         entity.set_feature(self.feature, True)
         self._state = True
         self.schedule_update_ha_state(force_refresh=True)
+        # Turning a feature on may clear its exclusive counterparts.
+        for other in self._group:
+            if other is not self and other.hass is not None:
+                other.schedule_update_ha_state(force_refresh=True)
 
     def turn_off(self, **kwargs):
         entity = self._get_climate_entity()
