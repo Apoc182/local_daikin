@@ -67,7 +67,9 @@ How it works:
   - **Home Assistant, Daikin app, OFF TIMER, or unknown source**: the unit is
     switched to fan-only for the configured duration, then powered off. An
     OFF TIMER off is detected by the unit's off-timer having 1-2 minutes left.
-- Fan speed and swing are not changed.
+- Fan speed: shortly after fan-only starts (a separate request on a later poll)
+  the fan-only fan speed is set to Auto. The unit's remembered fan-only speed
+  is not restored afterwards. Swing is not changed.
 - Timing: the drying starts on the first poll at least 30 seconds after the
   off is seen (typically about a minute).
 - Drying is cancelled (or handed over) if the unit is switched off or changed
@@ -88,6 +90,10 @@ Limitations and risks:
 - If Home Assistant is down or unreachable across the end time, the
   integration files are deleted without removing the entry, or a storage write
   fails, the unit keeps blowing until you switch it off.
+- The waiting phase (between the off and the start of drying, about 30-90
+  seconds) is not stored: a Home Assistant restart or options save in that
+  window skips that cycle. A start request that never reached the unit is
+  retried after a restart.
 - The unit reports only its last operation: e.g. a remote off followed within
   one poll by an app change causes an extra cycle on top of MOLD PROOF. A
   remote off in the last ~2 minutes of a pending OFF TIMER counts as a timer
