@@ -500,7 +500,7 @@ class LocalDaikin(ClimateEntity):
                 self._update_state(False)
             except Exception as err:
                 _LOGGER.warning(
-                    "Daikin %s: post-off drying power-off failed, retrying next poll (%s)",
+                    "Daikin %s: post-off drying power-off failed, retrying (%s)",
                     self._ip, err,
                 )
                 return
@@ -733,7 +733,11 @@ class LocalDaikin(ClimateEntity):
                 _LOGGER.warning("Daikin %s: unknown hvac mode code %s", self._ip, mode_raw)
 
             ope_type = self.find_value_or_none(
-                data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "last_ope", "type"
+                data,
+                "/dsiot/edge/adr_0100.dgc_status",
+                "dgc_status",
+                "last_ope",
+                "type",
             )
             self._last_ope_type = ope_type if isinstance(ope_type, int) else None
             self._off_timer_minutes = self.parse_timer_minutes(
