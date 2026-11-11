@@ -226,3 +226,35 @@ def test_switch_available_follows_climate():
     climate._available = False
     switch = DaikinOutdoorQuietSwitch(_fake_hass(climate), "entry-1", IP)
     assert switch.available is False
+
+REJECTED_RESPONSE = {"responses": [{"rsc": 4000}]}
+
+
+def _rejected_post():
+    from unittest.mock import MagicMock
+
+    post = MagicMock()
+    post.return_value.json.return_value = REJECTED_RESPONSE
+    return post
+
+
+def test_rejected_write_keeps_cached_state():
+    """A rejected write must not leave a fake "on" in the cache."""
+    import pytest
+
+    entity = LocalDaikin(IP)
+    with patch(POST_PATH, _rejected_post()), pytest.raises(Exception):
+        entity.set_feature("comfort", True)
+    assert entity.extra_state_attributes["comfort"] is None
+
+
+def test_rejected_write_keeps_exclusive_state():
+    """A rejected write must not mark the opposite side as cleared."""
+    import pytest
+
+    entity = LocalDaikin(IP)
+    entity._features["powerful"] = "on"
+    with patch(POST_PATH, _rejected_post()), pytest.raises(Exception):
+        entity.set_feature("econo", True)
+    assert entity.extra_state_attributes["powerful"] == "on"
+    assert entity.extra_state_attributes["econo"] is None

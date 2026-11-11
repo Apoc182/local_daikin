@@ -650,16 +650,18 @@ class LocalDaikin(ClimateEntity):
         else:
             exclusives = ()
 
-        for exclusive in exclusives:
-            if self._features[exclusive] == "on":
-                excl_to, excl_path, excl_pn = FEATURE_MAP[exclusive]
-                attributes.append(
-                    DaikinAttribute(excl_pn, "00", excl_path, excl_to)
-                )
-                self._features[exclusive] = "off"
+        cleared = [e for e in exclusives if self._features[e] == "on"]
+        for exclusive in cleared:
+            excl_to, excl_path, excl_pn = FEATURE_MAP[exclusive]
+            attributes.append(
+                DaikinAttribute(excl_pn, "00", excl_path, excl_to)
+            )
 
-        self._features[feature] = state  # optimistic
+        # Update the cache only after the unit accepted the write.
         self._send_attribute(DaikinRequest(attributes).serialize())
+        self._features[feature] = state
+        for exclusive in cleared:
+            self._features[exclusive] = "off"
 
 
     @property
