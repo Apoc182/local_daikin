@@ -75,9 +75,12 @@ much like the built-in cycle.
   guaranteed, switch the unit off from Home Assistant.
 - The sequence is cancelled automatically if you switch the unit on (or
   change its mode) during the 60 minutes.
-- Timing note: state changes are confirmed by the 60-second poll, so in the
-  normal case the sequence starts after about 1 minute (worst case ~2
-  minutes) and ends within ~1 minute after the 60 minutes elapse.
+- Timing note: the sequence is driven by the 60-second poll and pauses 30
+  seconds between steps, because the unit resets its fan speed when its mode
+  changes. After the off is seen, fan-only is started on the next poll (about
+  1-2 minutes after the off), the quiet fan speed is set as a separate step on
+  the poll after that, and the sequence ends within ~1 minute after the 60
+  minutes elapse.
 - The 60-minute duration matches the MOLD PROOF duration documented in the
   official operation manuals for the same-generation (firmware 2.8.0) Daikin
   units.

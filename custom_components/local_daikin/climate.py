@@ -20,7 +20,11 @@ from homeassistant.helpers.device_registry import DeviceInfo
 
 from datetime import timedelta
 
-from .const import CONF_POST_OFF_DRYING, POST_OFF_DRYING_DURATION
+from .const import (
+    CONF_POST_OFF_DRYING,
+    POST_OFF_DRYING_DURATION,
+    POST_OFF_DRYING_START_DELAY,
+)
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -206,8 +210,10 @@ class LocalDaikin(ClimateEntity):
         # sequence is wanted) from an external off (remote/app — the unit
         # runs its own 60-minute MOLD PROOF cycle and we must stay out).
         self._local_off_pending: bool = False
-        self._drying_phase: str | None = None  # None | "waiting" | "drying"
+        # None | "waiting" | "quiet" | "drying"
+        self._drying_phase: str | None = None
         self._drying_deadline: float | None = None
+        self._drying_step_after: float = 0.0  # earliest time for the next step
         self._pre_transition_mode: HVACMode | None = HVACMode.OFF
         self._hvac_mode = HVACMode.OFF
         self._fan_mode = HAFanMode.FAN_QUIET
@@ -367,9 +373,13 @@ class LocalDaikin(ClimateEntity):
                                 but only when this integration sent the off
                                 (external off: the unit runs its own MOLD
                                 PROOF cycle, so the sequence is skipped)
-          waiting  -> drying   if the unit is still OFF (fan-only + quiet sent)
+          waiting  -> quiet    after a short delay, if the unit is still OFF
+                               (fan-only + power on sent)
           waiting  -> None     if the unit is on again (user took over)
-          drying   -> None     at deadline (power off) or if the mode is no
+          quiet    -> drying   after a short delay (quiet fan speed sent as its
+                               own request: the unit resets the fan speed on
+                               the mode change, so it cannot ride along)
+          quiet/drying -> None at deadline (power off) or if the mode is no
                                longer FAN_ONLY (user restarted / switched off)
         """
         if not self._post_off_drying:
@@ -388,7 +398,13 @@ class LocalDaikin(ClimateEntity):
                         self._pre_transition_mode.value,
                     )
                     self._drying_phase = "waiting"
-                elif not self._local_off_pending:
+                    self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
+                elif (
+                    not self._local_off_pending
+                    and self._pre_transition_mode != HVACMode.OFF
+                ):
+                    # Only on the transition into off, not on every poll while
+                    # it stays off (and not for our own end-of-drying power-off).
                     _LOGGER.debug(
                         "Daikin %s: external off detected — built-in MOLD "
                         "PROOF cycle will run, post-off drying skipped",
@@ -413,7 +429,8 @@ class LocalDaikin(ClimateEntity):
                 self._local_off_pending = False
                 self._pre_transition_mode = self._hvac_mode
                 return
-            fan_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[HVACMode.FAN_ONLY]
+            if now < self._drying_step_after:
+                return
             try:
                 self._send_attribute(
                     DaikinRequest(
@@ -430,12 +447,6 @@ class LocalDaikin(ClimateEntity):
                                 ["e_1002", "e_A002"],
                                 "/dsiot/edge/adr_0100.dgc_status",
                             ),
-                            DaikinAttribute(
-                                fan_name,
-                                FAN_MODE_MAP[HAFanMode.FAN_QUIET],
-                                ["e_1002", "e_3001"],
-                                "/dsiot/edge/adr_0100.dgc_status",
-                            ),
                         ]
                     ).serialize()
                 )
@@ -448,12 +459,12 @@ class LocalDaikin(ClimateEntity):
                 return
             # Commit the phase only after the command was accepted.
             self._drying_deadline = now + POST_OFF_DRYING_DURATION
-            self._drying_phase = "drying"
+            self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
+            self._drying_phase = "quiet"
             self._hvac_mode = HVACMode.FAN_ONLY  # optimistic
-            self._fan_mode = HAFanMode.FAN_QUIET
             return
 
-        # drying
+        # quiet / drying
         if self._hvac_mode != HVACMode.FAN_ONLY:
             _LOGGER.info(
                 "Daikin %s: post-off drying cancelled (mode is %s)",
@@ -482,6 +493,34 @@ class LocalDaikin(ClimateEntity):
             self._local_off_pending = False
             self._pre_transition_mode = HVACMode.OFF
             self._hvac_mode = HVACMode.OFF  # optimistic
+            return
+
+        if self._drying_phase == "quiet" and now >= self._drying_step_after:
+            # Sent on its own, after the mode change has settled: written in the
+            # same request as the mode change the unit fell back to Auto.
+            try:
+                self._send_attribute(
+                    DaikinRequest(
+                        [
+                            DaikinAttribute(
+                                HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[HVACMode.FAN_ONLY],
+                                FAN_MODE_MAP[HAFanMode.FAN_QUIET],
+                                ["e_1002", "e_3001"],
+                                "/dsiot/edge/adr_0100.dgc_status",
+                            ),
+                        ]
+                    ).serialize()
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Daikin %s: post-off drying quiet fan failed, retrying (%s)",
+                    self._ip, err,
+                )
+                return
+            self._fan_mode = HAFanMode.FAN_QUIET  # optimistic
+            self._drying_phase = "drying"
+            return
+
 
     @property
     def temperature_unit(self):
