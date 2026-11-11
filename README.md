@@ -49,6 +49,32 @@ results.
   - Sensors: Outdoor temperature, energy today, runtime today indoor temp, humidity
   - Sensor: Target temperature (Not programming only, not in UI, Null if not applicable due to HVAC Mode)
 
+### Post-off drying (mold proof)
+
+Daikin units run a "MOLD PROOF" internal-clean cycle (about 60 minutes of
+drying airflow) after COOL or DRY operation ends. The unit only runs it when
+switched off by the remote: the official manuals state the cycle is **skipped
+when the unit is turned off via a timer or a smartphone**, so switching off
+from Home Assistant does not trigger it.
+
+To compensate, the integration offers an opt-in **post-off drying** option
+(open the integration entry → *Options*). When enabled, after the unit is
+switched off from COOL or DRY, Home Assistant turns the unit back into a
+fan-only (quiet fan) operation for **60 minutes** and powers it off again —
+drying the evaporator much like the built-in cycle.
+
+- The sequence is cancelled automatically if you switch the unit on (or
+  change its mode) during the 60 minutes.
+- Timing note: state changes are confirmed by the 60-second poll, so the
+  drying cycle starts up to ~2 minutes after the off command and ends within
+  ~1 minute after the 60 minutes elapse.
+- It is a workaround for the skipped MOLD PROOF cycle, not a replacement for
+  remote-triggered cycles: if you normally switch the unit off with the
+  remote, the built-in cycle runs on its own and the option is not needed.
+- The 60-minute duration matches the MOLD PROOF duration documented in the
+  official operation manuals for the same-generation (firmware 2.8.0) Daikin
+  units.
+
 ## Notes
 - If upgrading from v0.0.5 (or earlier), you will need to delete the manual configuration in your `configuration.yaml` and reconfigure via the Home Assistant devices panel.
 - Ensure your Daikin unit is on the same network as Home Assistant.

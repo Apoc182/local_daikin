@@ -10,10 +10,13 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY
+from homeassistant.config_entries import (
+    SOURCE_INTEGRATION_DISCOVERY,
+    OptionsFlowWithReload,
+)
 from homeassistant.data_entry_flow import FlowResultType, UnknownFlow
 
-from .const import CONF_IP_ADDRESS, DOMAIN
+from .const import CONF_IP_ADDRESS, CONF_POST_OFF_DRYING, DOMAIN
 from .scanner import (
     DaikinConnectionError,
     DaikinDeviceInfo,
@@ -53,10 +56,45 @@ def _schema(default: str | None = None) -> vol.Schema:
     return vol.Schema({field: str})
 
 
+class DaikinOptionsFlow(OptionsFlowWithReload):
+    """Handle changing per-entry options for a Local Daikin adapter.
+
+    Saving the options reloads the entry (OptionsFlowWithReload), so the
+    climate entity picks up the new post-off drying setting.
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show the options form."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_POST_OFF_DRYING,
+                        default=self.config_entry.options.get(
+                            CONF_POST_OFF_DRYING, False
+                        ),
+                    ): bool
+                }
+            ),
+        )
+
+
 class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle adding and reconfiguring a Daikin LAN adapter."""
 
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options flow for an entry."""
+        return DaikinOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

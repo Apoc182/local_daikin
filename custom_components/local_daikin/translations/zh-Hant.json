@@ -48,5 +48,16 @@
       "scan_complete": "已新增 {added} 台大金冷氣；另有 {skipped} 台已設定。",
       "scan_partial": "已新增 {added} 台、略過 {skipped} 台，另有 {failed} 台新增失敗：{failed_ips}。"
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Local Daikin 選項",
+        "description": "調整此大金冷氣關機後的行為。",
+        "data": {
+          "post_off_drying": "關機後乾燥（防霉）"
+        }
+      }
+    }
   }
 }

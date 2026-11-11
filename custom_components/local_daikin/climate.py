@@ -14,10 +14,13 @@ from homeassistant.helpers.device_registry import format_mac
 from typing import Any, List
 from dataclasses import dataclass, field
 from enum import StrEnum
+from time import time
 
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from datetime import timedelta
+
+from .const import CONF_POST_OFF_DRYING, POST_OFF_DRYING_DURATION
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -156,7 +159,7 @@ class DaikinRequest:
 
 async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]
-    entity = LocalDaikin(ip)
+    entity = LocalDaikin(ip, options=entry.options)
 
     # Retry initial update with backoff — Daikin units can be slow after HA reboot
     import asyncio
@@ -190,9 +193,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities([entity])
 
 class LocalDaikin(ClimateEntity):
-    def __init__(self, ip_address: str):
+    def __init__(self, ip_address: str, options: dict[str, Any] | None = None):
         self._name = "Local Daikin"
         self.url = f"http://{ip_address}/dsiot/multireq"
+        self._post_off_drying = bool(
+            (options or {}).get(CONF_POST_OFF_DRYING, False)
+        )
+        # Post-off drying state machine (mold-proof workaround). Driven by the
+        # 60s poll; no timers or extra HTTP calls.
+        self._drying_phase: str | None = None  # None | "waiting" | "drying"
+        self._drying_deadline: float | None = None
+        self._pre_transition_mode: HVACMode | None = HVACMode.OFF
         self._hvac_mode = HVACMode.OFF
         self._fan_mode = HAFanMode.FAN_QUIET
         self._swing_mode = SWING_OFF
@@ -342,6 +353,86 @@ class LocalDaikin(ClimateEntity):
             ).serialize()
         )
 
+
+    def _process_post_off_drying(self, now: float) -> None:
+        """Advance the post-off drying state machine on each poll.
+
+        Phases:
+          None     -> waiting   on a COOL/DRY -> OFF transition (option on)
+          waiting  -> drying   if the unit is still OFF (fan-only + quiet sent)
+          waiting  -> None     if the unit is on again (user took over)
+          drying   -> None     at deadline (power off) or if the mode is no
+                               longer FAN_ONLY (user restarted / switched off)
+        """
+        if not self._post_off_drying:
+            return
+
+        if self._drying_phase is None:
+            if (
+                self._hvac_mode == HVACMode.OFF
+                and self._pre_transition_mode in (HVACMode.COOL, HVACMode.DRY)
+            ):
+                _LOGGER.info(
+                    "Daikin %s: %s off — starting post-off drying sequence",
+                    self._ip,
+                    self._pre_transition_mode.value,
+                )
+                self._drying_phase = "waiting"
+            self._pre_transition_mode = self._hvac_mode
+            return
+
+        if self._drying_phase == "waiting":
+            if self._hvac_mode != HVACMode.OFF:
+                self._drying_phase = None
+                self._pre_transition_mode = self._hvac_mode
+                return
+            self._drying_phase = "drying"
+            self._drying_deadline = now + POST_OFF_DRYING_DURATION
+            fan_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[HVACMode.FAN_ONLY]
+            self._send_attribute(
+                DaikinRequest(
+                    [
+                        DaikinAttribute(
+                            "p_01",
+                            REVERSE_MODE_MAP[HVACMode.FAN_ONLY],
+                            ["e_1002", "e_3001"],
+                            "/dsiot/edge/adr_0100.dgc_status",
+                        ),
+                        DaikinAttribute(
+                            "p_01",
+                            "01",
+                            ["e_1002", "e_A002"],
+                            "/dsiot/edge/adr_0100.dgc_status",
+                        ),
+                        DaikinAttribute(
+                            fan_name,
+                            FAN_MODE_MAP[HAFanMode.FAN_QUIET],
+                            ["e_1002", "e_3001"],
+                            "/dsiot/edge/adr_0100.dgc_status",
+                        ),
+                    ]
+                ).serialize()
+            )
+            self._hvac_mode = HVACMode.FAN_ONLY  # optimistic
+            self._fan_mode = HAFanMode.FAN_QUIET
+            return
+
+        # drying
+        if self._hvac_mode != HVACMode.FAN_ONLY:
+            _LOGGER.info(
+                "Daikin %s: post-off drying cancelled (mode is %s)",
+                self._ip,
+                self._hvac_mode.value,
+            )
+            self._drying_phase = None
+            self._pre_transition_mode = self._hvac_mode
+            return
+
+        if now >= self._drying_deadline:
+            _LOGGER.info("Daikin %s: post-off drying finished — powering off", self._ip)
+            self._drying_phase = None
+            self._update_state(False)
+            self._pre_transition_mode = HVACMode.OFF
 
     @property
     def temperature_unit(self):
@@ -660,6 +751,8 @@ class LocalDaikin(ClimateEntity):
             )
             if runtime_today is not None:
                 self._runtime_today = runtime_today
+
+            self._process_post_off_drying(now=time())
 
             # Successfully parsed — mark available
             self._available = True
