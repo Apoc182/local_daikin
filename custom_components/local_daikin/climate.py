@@ -1017,7 +1017,8 @@ class LocalDaikin(ClimateEntity):
                 self._runtime_today = runtime_today
 
             for feature, (to, path, pn) in FEATURE_MAP.items():
-                raw = self.try_find_value_by_pn(data, to, "dgc_status", *path, pn)
+                # Optional per model: absence is normal, so do not log it.
+                raw = self.find_value_or_none(data, to, "dgc_status", *path, pn)
                 if raw == "01":
                     self._features[feature] = "on"
                 elif raw == "00":

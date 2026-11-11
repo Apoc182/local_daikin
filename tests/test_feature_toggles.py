@@ -261,3 +261,19 @@ def test_rejected_write_keeps_exclusive_state():
         entity.set_feature("econo", True)
     assert entity.extra_state_attributes["powerful"] == "on"
     assert entity.extra_state_attributes["econo"] is None
+
+
+def test_missing_feature_nodes_do_not_log_warnings(caplog):
+    """Models without these features must not log a WARNING every poll."""
+    import logging
+
+    response = {
+        "responses": [
+            {"rsc": 2004, "fr": INDOOR, "pc": {"pn": "dgc_status", "pch": []}}
+        ]
+    }
+    with caplog.at_level(logging.WARNING):
+        _entity_with_features(response)
+    feature_pns = {pn for _, _, pn in FEATURE_MAP.values()}
+    noisy = [r for r in caplog.records if any(pn in r.getMessage() for pn in feature_pns)]
+    assert noisy == []
