@@ -2,6 +2,7 @@
 
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -515,7 +516,8 @@ def test_unrecorded_fan_only_untouched():
 
 
 def test_post_off_drying_end_property():
-    entity = _drying(deadline=T0 + 100)
+    entity = _drying(deadline=1_800_000_000.0)  # exactly representable
     end = entity.post_off_drying_end
-    assert end.tzinfo is not None and end.timestamp() == T0 + 100
+    assert end == datetime(2027, 1, 15, 8, 0, tzinfo=UTC)
+    assert end.utcoffset() == timedelta(0)
     assert _entity().post_off_drying_end is None
