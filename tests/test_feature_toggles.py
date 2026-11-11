@@ -306,3 +306,22 @@ async def test_turning_on_feature_refreshes_exclusive_switches():
     by_type[DaikinPowerfulSwitch].schedule_update_ha_state.assert_called_once_with(
         force_refresh=True
     )
+
+
+def test_partially_rejected_write_keeps_cached_state():
+    """Econo (indoor) + clearing Powerful (outdoor) spans two resources and
+    gets two responses; a rejection in the second one must still count."""
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    entity = LocalDaikin(IP)
+    entity._features["powerful"] = "on"
+    post = MagicMock()
+    post.return_value.json.return_value = {
+        "responses": [{"rsc": 2004}, {"rsc": 4000}]
+    }
+    with patch(POST_PATH, post), pytest.raises(Exception, match="occured"):
+        entity.set_feature("econo", True)
+    assert entity.extra_state_attributes["powerful"] == "on"
+    assert entity.extra_state_attributes["econo"] is None

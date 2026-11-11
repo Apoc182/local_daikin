@@ -793,11 +793,13 @@ class LocalDaikin(ClimateEntity):
             _LOGGER.error("Daikin %s: failed to send command: %s", self._ip, err)
             raise
         _LOGGER.info(response)
-        if response['responses'][0]['rsc'] != 2004:
+        # One response per target resource; every one must be accepted.
+        rscs = [r.get('rsc') for r in response['responses']]
+        if any(rsc != 2004 for rsc in rscs):
             _LOGGER.warning(
                 "Daikin %s: command rejected (rsc=%s). request=%s response=%s",
                 self._ip,
-                response['responses'][0].get('rsc'),
+                rscs,
                 request,
                 response,
             )
