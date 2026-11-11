@@ -1,5 +1,6 @@
 """Tests for the post-off drying store and its entry-removal handling."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 from homeassistant.components.climate.const import HVACMode
@@ -86,3 +87,26 @@ async def test_remove_entry_leaves_unit_alone_if_not_fan_only(hass, hass_storage
         await async_remove_entry(hass, _entry(hass))
     assert post.call_count == 1
     assert KEY not in hass_storage
+
+
+async def test_remove_entry_warns_when_unit_unreachable(hass, hass_storage, caplog):
+    from requests.exceptions import ConnectionError as ReqConnectionError
+
+    hass_storage[KEY] = {"version": 1, "data": {"deadline": 9e9}}
+    with (
+        patch(POST_PATH, side_effect=ReqConnectionError()),
+        caplog.at_level(logging.WARNING),
+    ):
+        await async_remove_entry(hass, _entry(hass))
+    assert "unreachable" in caplog.text
+    assert KEY not in hass_storage
+
+
+async def test_remove_entry_survives_storage_error(hass, caplog):
+    with (
+        patch.object(DryingStore, "async_remove", side_effect=OSError("disk")),
+        patch(POST_PATH),
+        caplog.at_level(logging.WARNING),
+    ):
+        await async_remove_entry(hass, _entry(hass))
+    assert "Could not delete the Local Daikin drying record" in caplog.text

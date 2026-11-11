@@ -83,7 +83,13 @@ async def async_remove_entry(hass, entry):
         if await store.async_load() is not None:
             unit = LocalDaikin(entry.data[CONF_IP_ADDRESS])
             await hass.async_add_executor_job(unit.update)
-            if unit._hvac_mode == HVACMode.FAN_ONLY:
+            if not unit._available:
+                _LOGGER.warning(
+                    "Local Daikin %s was unreachable on removal and could not be "
+                    "powered off; a drying cycle may still be running",
+                    entry.data[CONF_IP_ADDRESS],
+                )
+            elif unit._hvac_mode == HVACMode.FAN_ONLY:
                 await hass.async_add_executor_job(unit._update_state, False)
     except Exception:  # noqa: BLE001 - removal must not fail
         _LOGGER.warning(
@@ -92,4 +98,9 @@ async def async_remove_entry(hass, entry):
             exc_info=True,
         )
     finally:
-        await store.async_remove()
+        try:
+            await store.async_remove()
+        except Exception:  # noqa: BLE001 - removal must not fail
+            _LOGGER.warning(
+                "Could not delete the Local Daikin drying record", exc_info=True
+            )

@@ -277,7 +277,6 @@ class LocalDaikin(ClimateEntity):
         return self._available
 
     def set_hvac_mode(self, hvac_mode):
-        self._user_takeover()
         _LOGGER.info("Set Hvac mode to " + str(hvac_mode))
 
         if hvac_mode == HVACMode.OFF:
@@ -292,8 +291,9 @@ class LocalDaikin(ClimateEntity):
             self._hvac_mode = hvac_mode
 
             # Potentially add the turn on attribute here, unsure.
-            self.turn_on()
+            self._update_state(True)
             self._send_attribute(DaikinRequest([attribute]).serialize())
+            self._user_takeover()
 
 
     async def initialize_unique_id(self, hass):
@@ -355,7 +355,6 @@ class LocalDaikin(ClimateEntity):
         return True
 
     def set_fan_mode(self, fan_mode: str):
-        self._user_takeover()
         mode = FAN_MODE_MAP[fan_mode]
         name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
 
@@ -364,11 +363,11 @@ class LocalDaikin(ClimateEntity):
             self._fan_mode = HAFanMode(fan_mode)  # optimistic
             mode_attr = DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
             self._send_attribute(DaikinRequest([mode_attr]).serialize())
+            self._user_takeover()
         else:
             self._fan_mode = HAFanMode.FAN_AUTO
 
     def set_swing_mode(self, swing_mode: str):
-        self._user_takeover()
         if self.hvac_mode == HVACMode.OFF:
             return
         self._swing_mode = swing_mode  # optimistic
@@ -383,6 +382,7 @@ class LocalDaikin(ClimateEntity):
                 ]
             ).serialize()
         )
+        self._user_takeover()
 
 
     def _persist(self, deadline: float | None) -> bool:
@@ -415,7 +415,11 @@ class LocalDaikin(ClimateEntity):
         self._persist(None)
 
     def _user_takeover(self) -> None:
-        if self._drying_phase is not None:
+        """Hand the unit back after an accepted HA command while drying.
+
+        "waiting" is left to polling: it sees the unit come back on.
+        """
+        if self._drying_phase == "drying":
             self._cancel_drying("changed from Home Assistant")
 
     def _process_post_off_drying(self, now: float) -> None:
@@ -425,7 +429,8 @@ class LocalDaikin(ClimateEntity):
         waiting -> None     unit on again, or the off came from the IR remote
                             (the unit runs its own MOLD PROOF cycle)
         waiting -> drying   after the start delay (last_ope has caught up):
-                            fan-only + power on, at the unit's own fan speed
+                            fan-only + power on, at the unit's own fan speed;
+                            or a failed start the unit applied (reads FAN_ONLY)
         drying  -> None     at the deadline (power off), or cancelled if the
                             mode changed or the remote/app operated the unit
         """
@@ -454,8 +459,15 @@ class LocalDaikin(ClimateEntity):
 
         if self._drying_phase == "waiting":
             if hvac != HVACMode.OFF:
+                if self._drying_deadline is not None:
+                    if hvac == HVACMode.FAN_ONLY:
+                        # A start failed (e.g. timed out) but the unit applied it.
+                        self._drying_phase = "drying"
+                        return
+                    self._cancel_drying(f"mode is {hvac.value}")
                 self._drying_phase = None
                 self._pre_transition_mode = hvac
+                self._last_on_timer_minutes = self._off_timer_minutes
                 return
             if now < self._drying_step_after:
                 return
@@ -465,6 +477,8 @@ class LocalDaikin(ClimateEntity):
                     "post-off drying skipped",
                     self._ip,
                 )
+                if self._drying_deadline is not None:
+                    self._cancel_drying("remote off")
                 self._drying_phase = None
                 self._pre_transition_mode = HVACMode.OFF
                 return
@@ -492,12 +506,13 @@ class LocalDaikin(ClimateEntity):
                     ).serialize()
                 )
             except Exception as err:
-                # Rejected write: stay in "waiting" so the next poll retries.
+                # Stay in "waiting": the next poll retries, or adopts the cycle if
+                # the unit applied the command anyway (e.g. the reply timed out).
                 _LOGGER.warning(
                     "Daikin %s: post-off drying start failed, retrying next poll (%s)",
                     self._ip, err,
                 )
-                self._persist(None)
+                self._drying_deadline = deadline
                 return
             self._drying_deadline = deadline
             self._drying_phase = "drying"
@@ -512,6 +527,8 @@ class LocalDaikin(ClimateEntity):
         if hvac != HVACMode.FAN_ONLY:
             self._cancel_drying(f"mode is {hvac.value}")
             self._pre_transition_mode = hvac
+            if hvac != HVACMode.OFF:
+                self._last_on_timer_minutes = self._off_timer_minutes
             return
 
         if self._last_ope_type is not None and self._last_ope_type != LAST_OPE_LOCAL:
@@ -643,7 +660,6 @@ class LocalDaikin(ClimateEntity):
 
 
     def set_temperature(self, temperature: float, **kwargs):
-        self._user_takeover()
         _LOGGER.info("Temp change to " + str(temperature) + " requested.")
         attr_name = HVAC_TO_TEMP_HEX.get(self.hvac_mode)
         if attr_name is None:
@@ -654,6 +670,7 @@ class LocalDaikin(ClimateEntity):
         temperature_hex = format(int(temperature * 2), '02x') 
         temp_attr = DaikinAttribute(attr_name, temperature_hex, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
         self._send_attribute(DaikinRequest([temp_attr]).serialize())
+        self._user_takeover()
 
     def _send_attribute(self, request: dict) -> None:
         """Send a command to the Daikin unit. Does NOT poll for updated state afterwards
@@ -680,15 +697,15 @@ class LocalDaikin(ClimateEntity):
         self._send_attribute(DaikinRequest([attribute]).serialize())
 
     def turn_off(self):
-        self._user_takeover()
         _LOGGER.info("Turned off")
         self._hvac_mode = HVACMode.OFF  # optimistic
         self._update_state(False)
+        self._user_takeover()
 
     def turn_on(self):
-        self._user_takeover()
         _LOGGER.info("Turned on")
         self._update_state(True)
+        self._user_takeover()
 
     def get_swing_state(self, data: dict) -> str:
 

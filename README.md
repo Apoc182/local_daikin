@@ -68,17 +68,20 @@ How it works:
     switched to fan-only for the configured duration, then powered off. An
     OFF TIMER off is detected by the unit's off-timer having 1-2 minutes left.
 - Fan speed and swing are not changed.
-- Timing: the drying starts about 30 seconds after the off is seen (decided on
-  the next 60-second poll).
+- Timing: the drying starts on the first poll at least 30 seconds after the
+  off is seen (typically about a minute).
 - Drying is cancelled (or handed over) if the unit is switched off or changed
-  to another mode from any source, if the remote or app operates it during
-  drying (the fan keeps running and you switch it off yourself), or on any
-  Home Assistant climate action during drying.
+  to another mode from any source, or if the remote or app operates it during
+  drying (the fan keeps running and you switch it off yourself). An accepted
+  Home Assistant climate action during drying (fan speed, swing, mode,
+  temperature, on/off) hands the unit back to you.
 - The sensor **Daikin Post-off Drying End (<ip>)** shows the end time while
   drying, and is unknown otherwise.
 - Drying survives a Home Assistant restart, reload, or options save: it
   resumes, or powers the unit off if the end time already passed. Removing the
-  integration entry mid-drying powers the unit off.
+  integration entry mid-drying powers the unit off. Disabling the integration
+  entry mid-drying leaves the unit blowing until the entry is re-enabled or the
+  unit is switched off.
 
 Limitations and risks:
 

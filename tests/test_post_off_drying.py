@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.components.climate.const import HVACMode
+from requests.exceptions import Timeout
 
 from custom_components.local_daikin.climate import LocalDaikin
 from custom_components.local_daikin.const import (
@@ -291,15 +292,53 @@ def test_remote_or_app_operation_during_drying_cancels(source):
     [
         lambda e: e.set_fan_mode("Auto"),
         lambda e: e.set_swing_mode("off"),
-        lambda e: e.set_temperature(24),
+        lambda e: e.set_hvac_mode(HVACMode.COOL),
         lambda e: e.turn_on(),
+        lambda e: e.turn_off(),
     ],
 )
 def test_ha_service_call_during_drying_cancels(call):
-    entity = _drying()
+    store = FakeStore()
+    entity = _with_store(_drying(), store)
     with patch(POST_PATH, _accepted_post()):
         call(entity)
     assert entity._drying_phase is None
+    assert store.saved[-1] is None
+
+
+def test_ha_call_sending_nothing_keeps_drying():
+    entity = _drying()  # FAN_ONLY has no target temperature
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity.set_temperature(temperature=25)
+    post.assert_not_called()
+    assert entity._drying_phase == "drying"
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda e: e.turn_off(),
+        lambda e: e.set_fan_mode("Auto"),
+        lambda e: e.set_hvac_mode(HVACMode.COOL),
+    ],
+)
+def test_rejected_ha_call_keeps_drying(call):
+    store = FakeStore()
+    entity = _with_store(_drying(), store)
+    with patch(POST_PATH, _rejected()), pytest.raises(Exception, match="3002"):
+        call(entity)
+    assert entity._drying_phase == "drying"
+    assert store.saved == []
+
+
+@pytest.mark.parametrize(
+    "call", [lambda e: e.turn_off(), lambda e: e.set_fan_mode("Auto")]
+)
+def test_ha_call_while_waiting_keeps_waiting(call):
+    entity = _armed(source=100)
+    with patch(POST_PATH, _accepted_post()):
+        call(entity)
+    assert entity._drying_phase == "waiting"
 
 
 def test_rejected_start_retries_next_poll():
@@ -414,13 +453,59 @@ def test_store_failure_blocks_start_and_retries():
     assert entity._drying_phase == "drying"
 
 
-def test_send_failure_clears_record():
+def test_send_failure_keeps_record():
     store = FakeStore()
     entity = _with_store(_armed(source=100), store)
     with patch(POST_PATH, _rejected()):
         entity._process_post_off_drying(now=T0 + D)
-    assert store.saved == [T0 + D + entity._drying_seconds, None]
+    assert store.saved == [T0 + D + entity._drying_seconds]
     assert entity._drying_phase == "waiting"
+
+
+def test_start_timeout_then_fan_only_tracks_and_powers_off():
+    store = FakeStore()
+    entity = _with_store(_armed(source=100), store)
+    deadline = T0 + D + entity._drying_seconds
+    with patch(POST_PATH, side_effect=Timeout()):
+        entity._process_post_off_drying(now=T0 + D)
+    entity._hvac_mode = HVACMode.FAN_ONLY  # the unit applied it anyway
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + D + 60)
+        assert entity._drying_phase == "drying"
+        assert entity._drying_deadline == deadline
+        assert store.saved == [deadline]
+        post.assert_not_called()
+        entity._process_post_off_drying(now=deadline)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
+    assert entity._drying_phase is None
+    assert store.saved[-1] is None
+
+
+def test_start_failure_then_other_mode_clears_record():
+    store = FakeStore()
+    entity = _with_store(_armed(source=100), store)
+    with patch(POST_PATH, side_effect=Timeout()):
+        entity._process_post_off_drying(now=T0 + D)
+    entity._hvac_mode = HVACMode.COOL
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + D + 60)
+    post.assert_not_called()
+    assert entity._drying_phase is None
+    assert store.saved[-1] is None
+
+
+def test_unit_back_on_refreshes_off_timer_reading():
+    entity = _armed(source=100, _last_on_timer_minutes=2)
+    entity._hvac_mode = HVACMode.COOL
+    entity._off_timer_minutes = 0
+    entity._process_post_off_drying(now=T0 + D)
+    assert entity._last_on_timer_minutes == 0
+    entity = _drying()
+    entity._last_on_timer_minutes = 2
+    entity._hvac_mode = HVACMode.COOL
+    entity._off_timer_minutes = 0
+    entity._process_post_off_drying(now=T0)
+    assert entity._last_on_timer_minutes == 0
 
 
 def test_finish_clears_record():
