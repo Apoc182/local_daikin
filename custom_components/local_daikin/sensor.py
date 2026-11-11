@@ -17,6 +17,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         DaikinIndoorTempSensor(hass, entry.entry_id, ip),
         DaikinRuntimeTodaySensor(hass, entry.entry_id, ip),
         DaikinTargetTempSensor(hass, entry.entry_id, ip),
+        DaikinPostOffDryingEndSensor(hass, entry.entry_id, ip),
     ])
 
 
@@ -119,3 +120,12 @@ class DaikinTargetTempSensor(BaseDaikinSensor):
 
     def _read_state(self, entity):
         self._state = entity.target_temperature
+
+
+class DaikinPostOffDryingEndSensor(BaseDaikinSensor):
+    def __init__(self, hass, entry_id, ip):
+        super().__init__(hass, entry_id, ip, "Post-off Drying End", "post_off_drying_end")
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def _read_state(self, entity):
+        self._state = entity.post_off_drying_end
