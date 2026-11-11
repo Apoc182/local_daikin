@@ -325,3 +325,40 @@ def test_partially_rejected_write_keeps_cached_state():
         entity.set_feature("econo", True)
     assert entity.extra_state_attributes["powerful"] == "on"
     assert entity.extra_state_attributes["econo"] is None
+
+
+def test_poll_without_feature_node_resets_cache_to_unknown():
+    """A cached "on" must not stick once the unit stops reporting the node."""
+    entity = _entity_with_features(_feature_response("comfort", "01"))
+    assert entity.extra_state_attributes["comfort"] == "on"
+    response = {
+        "responses": [
+            {"rsc": 2004, "fr": INDOOR, "pc": {"pn": "dgc_status", "pch": []}}
+        ]
+    }
+    with patch(POST_PATH) as post:
+        post.return_value.json.return_value = response
+        entity.update()
+    assert entity.extra_state_attributes["comfort"] is None
+
+
+def test_poll_with_unexpected_feature_value_resets_cache_to_unknown():
+    entity = _entity_with_features(_feature_response("econo", "01"))
+    with patch(POST_PATH) as post:
+        post.return_value.json.return_value = _feature_response("econo", "02")
+        entity.update()
+    assert entity.extra_state_attributes["econo"] is None
+
+
+def test_empty_responses_count_as_rejected():
+    """An empty response list must not be mistaken for an accepted write."""
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    entity = LocalDaikin(IP)
+    post = MagicMock()
+    post.return_value.json.return_value = {"responses": []}
+    with patch(POST_PATH, post), pytest.raises(Exception, match="occured"):
+        entity.set_feature("comfort", True)
+    assert entity.extra_state_attributes["comfort"] is None

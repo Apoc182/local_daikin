@@ -795,7 +795,7 @@ class LocalDaikin(ClimateEntity):
         _LOGGER.info(response)
         # One response per target resource; every one must be accepted.
         rscs = [r.get('rsc') for r in response['responses']]
-        if any(rsc != 2004 for rsc in rscs):
+        if not rscs or any(rsc != 2004 for rsc in rscs):
             _LOGGER.warning(
                 "Daikin %s: command rejected (rsc=%s). request=%s response=%s",
                 self._ip,
@@ -1021,11 +1021,9 @@ class LocalDaikin(ClimateEntity):
             for feature, (to, path, pn) in FEATURE_MAP.items():
                 # Optional per model: absence is normal, so do not log it.
                 raw = self.find_value_or_none(data, to, "dgc_status", *path, pn)
-                if raw == "01":
-                    self._features[feature] = "on"
-                elif raw == "00":
-                    self._features[feature] = "off"
-                elif raw is not None:
+                # Anything but 00/01 reads as unknown, so a stale "on" cannot stick.
+                self._features[feature] = {"01": "on", "00": "off"}.get(raw)
+                if raw not in (None, "00", "01"):
                     _LOGGER.debug(
                         "Daikin %s: unknown feature value for %s: %s",
                         self._ip,
