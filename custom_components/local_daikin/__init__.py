@@ -48,12 +48,18 @@ async def _async_migrate_legacy_unique_id(hass, entry):
 async def async_setup(hass, config):
     return True
 
+async def _async_update_listener(hass, entry) -> None:
+    """Reload the entry so changed options take effect."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_setup_entry(hass, entry):
     await _async_migrate_legacy_unique_id(hass, entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"config": entry.data}
     await hass.config_entries.async_forward_entry_setups(
         entry, ["climate", "switch", "sensor", "select"]
     )
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
 async def async_unload_entry(hass, entry):

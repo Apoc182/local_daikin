@@ -10,13 +10,18 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.config_entries import (
-    SOURCE_INTEGRATION_DISCOVERY,
-    OptionsFlowWithReload,
-)
+from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY
 from homeassistant.data_entry_flow import FlowResultType, UnknownFlow
 
-from .const import CONF_IP_ADDRESS, CONF_POST_OFF_DRYING, DOMAIN
+from .const import (
+    CONF_IP_ADDRESS,
+    CONF_POST_OFF_DRYING,
+    CONF_POST_OFF_DRYING_MINUTES,
+    DOMAIN,
+    POST_OFF_DRYING_DEFAULT_MINUTES,
+    POST_OFF_DRYING_MAX_MINUTES,
+    POST_OFF_DRYING_MIN_MINUTES,
+)
 from .scanner import (
     DaikinConnectionError,
     DaikinDeviceInfo,
@@ -56,11 +61,11 @@ def _schema(default: str | None = None) -> vol.Schema:
     return vol.Schema({field: str})
 
 
-class DaikinOptionsFlow(OptionsFlowWithReload):
+class DaikinOptionsFlow(config_entries.OptionsFlow):
     """Handle changing per-entry options for a Local Daikin adapter.
 
-    Saving the options reloads the entry (OptionsFlowWithReload), so the
-    climate entity picks up the new post-off drying setting.
+    Saving the options reloads the entry via the update listener registered
+    in async_setup_entry, so the climate entity picks up the new settings.
     """
 
     async def async_step_init(
@@ -78,7 +83,20 @@ class DaikinOptionsFlow(OptionsFlowWithReload):
                         default=self.config_entry.options.get(
                             CONF_POST_OFF_DRYING, False
                         ),
-                    ): bool
+                    ): bool,
+                    vol.Required(
+                        CONF_POST_OFF_DRYING_MINUTES,
+                        default=self.config_entry.options.get(
+                            CONF_POST_OFF_DRYING_MINUTES,
+                            POST_OFF_DRYING_DEFAULT_MINUTES,
+                        ),
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=POST_OFF_DRYING_MIN_MINUTES,
+                            max=POST_OFF_DRYING_MAX_MINUTES,
+                        ),
+                    ),
                 }
             ),
         )

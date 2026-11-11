@@ -56,7 +56,8 @@
         "title": "Local Daikin options",
         "description": "Adjust how this Daikin unit behaves after it is switched off.",
         "data": {
-          "post_off_drying": "Post-off drying (mold proof)"
+          "post_off_drying": "Post-off drying (mold proof)",
+          "post_off_drying_minutes": "Drying duration (minutes)"
         }
       }
     }
