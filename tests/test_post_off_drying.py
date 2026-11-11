@@ -204,19 +204,36 @@ def test_local_off_triggers_sequence():
     post.assert_not_called()
 
 
-def test_stale_local_off_flag_cleared_by_next_on():
-    """A local off that never armed (e.g. unit was in HEAT) must not leak into
-    a later IR-remote off: the following on clears the flag."""
+def test_local_off_from_heat_consumes_flag():
+    """A local off that never arms (unit was in HEAT) must not leave a stale
+    flag behind: it is consumed as soon as the off is seen in the poll."""
     entity = _entity()
-    entity._pre_transition_mode = HVACMode.HEAT  # off-from-heat never arms
+    entity._pre_transition_mode = HVACMode.HEAT
     with patch(POST_PATH, _accepted_post()):
-        entity.turn_off()  # sets the flag
+        entity.turn_off()
+    assert entity._local_off_pending is True
     entity._process_post_off_drying(now=time.time())
     assert entity._drying_phase is None
-    # user restarts — the stale flag must be gone
-    with patch(POST_PATH, _accepted_post()):
-        entity.turn_on()
     assert entity._local_off_pending is False
+
+
+def test_stale_flag_does_not_leak_into_later_remote_off():
+    """Local off from FAN_ONLY (no sequence) -> remote cools -> remote off.
+    The first off's flag must not arm the sequence on the remote off, or we
+    would pile drying on top of the unit's own MOLD PROOF cycle."""
+    entity = _entity()
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    entity._pre_transition_mode = HVACMode.FAN_ONLY
+    with patch(POST_PATH, _accepted_post()):
+        entity.turn_off()  # local, but prev=FAN_ONLY -> never arms
+    entity._process_post_off_drying(now=time.time())
+    assert entity._drying_phase is None
+    # remote turns it on and cools, then switches it off — no HA involvement
+    entity._hvac_mode = HVACMode.COOL
+    entity._process_post_off_drying(now=time.time())
+    entity._hvac_mode = HVACMode.OFF
+    entity._process_post_off_drying(now=time.time())
+    assert entity._drying_phase is None
 
 
 def test_full_cycle_through_update():

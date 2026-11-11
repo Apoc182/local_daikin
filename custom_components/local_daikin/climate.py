@@ -376,12 +376,11 @@ class LocalDaikin(ClimateEntity):
             return
 
         if self._drying_phase is None:
-            if (
-                self._hvac_mode == HVACMode.OFF
-                and self._pre_transition_mode in (HVACMode.COOL, HVACMode.DRY)
-            ):
-                if self._local_off_pending:
-                    self._local_off_pending = False
+            if self._hvac_mode == HVACMode.OFF:
+                if (
+                    self._pre_transition_mode in (HVACMode.COOL, HVACMode.DRY)
+                    and self._local_off_pending
+                ):
                     _LOGGER.info(
                         "Daikin %s: %s off via this integration — starting "
                         "post-off drying sequence",
@@ -389,12 +388,22 @@ class LocalDaikin(ClimateEntity):
                         self._pre_transition_mode.value,
                     )
                     self._drying_phase = "waiting"
-                else:
+                elif not self._local_off_pending:
                     _LOGGER.debug(
                         "Daikin %s: external off detected — built-in MOLD "
                         "PROOF cycle will run, post-off drying skipped",
                         self._ip,
                     )
+                # Consume the flag once the off is evaluated, whether it armed
+                # the sequence or not: a locally-sent off that does not lead
+                # to drying (wrong previous mode) must not leak into a later
+                # remote off.
+                self._local_off_pending = False
+            else:
+                # A confirmed-on poll means a previously sent off no longer
+                # applies (the unit is running again), so drop any pending
+                # flag: it must not survive to arm a later remote off.
+                self._local_off_pending = False
             self._pre_transition_mode = self._hvac_mode
             return
 
