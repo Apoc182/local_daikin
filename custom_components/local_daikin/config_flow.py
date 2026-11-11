@@ -298,7 +298,7 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     else:
                         self._abort_if_unique_id_mismatch(reason="wrong_device")
 
-                    return self.async_update_reload_and_abort(
+                    return self.async_update_and_abort(
                         entry,
                         unique_id=device.mac,
                         data_updates={CONF_IP_ADDRESS: ip},
