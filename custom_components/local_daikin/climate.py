@@ -410,35 +410,45 @@ class LocalDaikin(ClimateEntity):
         if self._drying_phase == "waiting":
             if self._hvac_mode != HVACMode.OFF:
                 self._drying_phase = None
+                self._local_off_pending = False
                 self._pre_transition_mode = self._hvac_mode
                 return
-            self._drying_phase = "drying"
-            self._drying_deadline = now + POST_OFF_DRYING_DURATION
             fan_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[HVACMode.FAN_ONLY]
-            self._send_attribute(
-                DaikinRequest(
-                    [
-                        DaikinAttribute(
-                            "p_01",
-                            REVERSE_MODE_MAP[HVACMode.FAN_ONLY],
-                            ["e_1002", "e_3001"],
-                            "/dsiot/edge/adr_0100.dgc_status",
-                        ),
-                        DaikinAttribute(
-                            "p_01",
-                            "01",
-                            ["e_1002", "e_A002"],
-                            "/dsiot/edge/adr_0100.dgc_status",
-                        ),
-                        DaikinAttribute(
-                            fan_name,
-                            FAN_MODE_MAP[HAFanMode.FAN_QUIET],
-                            ["e_1002", "e_3001"],
-                            "/dsiot/edge/adr_0100.dgc_status",
-                        ),
-                    ]
-                ).serialize()
-            )
+            try:
+                self._send_attribute(
+                    DaikinRequest(
+                        [
+                            DaikinAttribute(
+                                "p_01",
+                                REVERSE_MODE_MAP[HVACMode.FAN_ONLY],
+                                ["e_1002", "e_3001"],
+                                "/dsiot/edge/adr_0100.dgc_status",
+                            ),
+                            DaikinAttribute(
+                                "p_01",
+                                "01",
+                                ["e_1002", "e_A002"],
+                                "/dsiot/edge/adr_0100.dgc_status",
+                            ),
+                            DaikinAttribute(
+                                fan_name,
+                                FAN_MODE_MAP[HAFanMode.FAN_QUIET],
+                                ["e_1002", "e_3001"],
+                                "/dsiot/edge/adr_0100.dgc_status",
+                            ),
+                        ]
+                    ).serialize()
+                )
+            except Exception as err:
+                # Rejected write: stay in "waiting" so the next poll retries.
+                _LOGGER.warning(
+                    "Daikin %s: post-off drying start failed, retrying next poll (%s)",
+                    self._ip, err,
+                )
+                return
+            # Commit the phase only after the command was accepted.
+            self._drying_deadline = now + POST_OFF_DRYING_DURATION
+            self._drying_phase = "drying"
             self._hvac_mode = HVACMode.FAN_ONLY  # optimistic
             self._fan_mode = HAFanMode.FAN_QUIET
             return
@@ -451,14 +461,27 @@ class LocalDaikin(ClimateEntity):
                 self._hvac_mode.value,
             )
             self._drying_phase = None
+            self._local_off_pending = False
             self._pre_transition_mode = self._hvac_mode
             return
 
         if now >= self._drying_deadline:
             _LOGGER.info("Daikin %s: post-off drying finished — powering off", self._ip)
+            # Commit the phase only after the power-off was accepted: a rejected
+            # write (exception caught below) leaves phase="drying" so the
+            # next poll retries — the unit does not run fan-only forever.
+            try:
+                self._update_state(False)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Daikin %s: post-off drying power-off failed, retrying next poll (%s)",
+                    self._ip, err,
+                )
+                return
             self._drying_phase = None
-            self._update_state(False)
+            self._local_off_pending = False
             self._pre_transition_mode = HVACMode.OFF
+            self._hvac_mode = HVACMode.OFF  # optimistic
 
     @property
     def temperature_unit(self):
@@ -782,6 +805,9 @@ class LocalDaikin(ClimateEntity):
             if runtime_today is not None:
                 self._runtime_today = runtime_today
 
+            # The state machine never raises: it catches its own command rejections and
+            # retries on the next poll, so a failed command does not take a
+            # healthy, fully-parsed entity offline.
             self._process_post_off_drying(now=time())
 
             # Successfully parsed — mark available

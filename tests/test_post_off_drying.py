@@ -204,6 +204,55 @@ def test_local_off_triggers_sequence():
     post.assert_not_called()
 
 
+def test_rejected_start_write_retries_next_poll():
+    """A rejected fan-only write must not consume the sequence: the phase
+    stays 'waiting' and the next poll retries the command."""
+    entity = _entity()
+    entity._drying_phase = "waiting"
+    rejected = MagicMock()
+    rejected.return_value.json.return_value = {"responses": [{"rsc": 3002}]}
+    with patch(POST_PATH, rejected):
+        entity._process_post_off_drying(now=time.time())  # caught, no raise
+    assert entity._drying_phase == "waiting"
+    assert entity._hvac_mode != HVACMode.FAN_ONLY
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=time.time())
+    assert entity._drying_phase == "drying"
+
+
+def test_rejected_off_at_deadline_retries_next_poll():
+    """A rejected power-off at the deadline must not clear the phase: the
+    unit must not run fan-only forever."""
+    entity = _entity()
+    entity._drying_phase = "drying"
+    entity._drying_deadline = time.time() - 1
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    rejected = MagicMock()
+    rejected.return_value.json.return_value = {"responses": [{"rsc": 3002}]}
+    with patch(POST_PATH, rejected):
+        entity._process_post_off_drying(now=time.time())  # raises
+    assert entity._drying_phase == "drying"  # still armed, will retry
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=time.time())
+    assert entity._drying_phase is None
+    assert entity._hvac_mode == HVACMode.OFF
+
+
+def test_local_off_during_active_drying_cannot_leak():
+    """A local off fired during an active sequence (phase drying) sets the
+    flag; the cancel must clear it so a later remote off is not armed."""
+    entity = _entity()
+    entity._drying_phase = "drying"
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    with patch(POST_PATH, _accepted_post()):
+        entity.turn_off()  # user stops the drying mid-cycle
+    assert entity._local_off_pending is True
+    # next poll: unit off -> sequence cancelled, stale flag must be dropped
+    entity._process_post_off_drying(now=time.time())
+    assert entity._drying_phase is None
+    assert entity._local_off_pending is False
+
+
 def test_local_off_from_heat_consumes_flag():
     """A local off that never arms (unit was in HEAT) must not leave a stale
     flag behind: it is consumed as soon as the off is seen in the poll."""
