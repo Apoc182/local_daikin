@@ -4,11 +4,13 @@ import logging
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
 from homeassistant.components.climate.const import HVACMode
 
-from custom_components.local_daikin.climate import HAFanMode, LocalDaikin
+from custom_components.local_daikin.climate import LocalDaikin
 from custom_components.local_daikin.const import (
     CONF_POST_OFF_DRYING,
+    CONF_POST_OFF_DRYING_MINUTES,
     POST_OFF_DRYING_START_DELAY,
 )
 
@@ -44,387 +46,324 @@ def _leaves(payload: dict) -> list[tuple[str, str]]:
     return leaves
 
 
-def _status_response(mode: HVACMode, is_off: str) -> dict:
-    """Build a dgc_status response for a given mode and power state."""
-    return {
-        "responses": [
+def _status_response(mode: HVACMode, is_off: str, *, source=None, timer="0000") -> dict:
+    """Build a dgc_status response for a given mode, power state and source."""
+    pc = {
+        "pn": "dgc_status",
+        "pch": [
             {
-                "rsc": 2004,
-                "fr": INDOOR,
-                "pc": {
-                    "pn": "dgc_status",
-                    "pch": [
-                        {
-                            "pn": "e_1002",
-                            "pch": [
-                                {"pn": "e_A002", "pch": [{"pn": "p_01", "pv": is_off}]},
-                                {
-                                    "pn": "e_3001",
-                                    "pch": [{"pn": "p_01", "pv": MODE_HEX[mode]}],
-                                },
-                            ],
-                        }
-                    ],
-                },
+                "pn": "e_1002",
+                "pch": [
+                    {"pn": "e_A002", "pch": [{"pn": "p_01", "pv": is_off}]},
+                    {"pn": "e_3001", "pch": [{"pn": "p_01", "pv": MODE_HEX[mode]}]},
+                    {"pn": "e_3003", "pch": [{"pn": "p_3B", "pv": timer}]},
+                ],
             }
-        ]
+        ],
     }
+    if source is not None:
+        pc["pch"].append(
+            {
+                "pn": "last_ope",
+                "pch": [
+                    {"pn": "type", "pv": source},
+                    {"pn": "time", "pv": "2026-11-12T00:00:00Z"},
+                    {"pn": "chg_flg", "pv": 0},
+                ],
+            }
+        )
+    return {"responses": [{"rsc": 2004, "fr": INDOOR, "pc": pc}]}
 
 
-def _entity(option: bool = True) -> LocalDaikin:
-    return LocalDaikin(IP, options={CONF_POST_OFF_DRYING: option})
+def _entity(option: bool = True, minutes: int | None = None) -> LocalDaikin:
+    options = {CONF_POST_OFF_DRYING: option}
+    if minutes is not None:
+        options[CONF_POST_OFF_DRYING_MINUTES] = minutes
+    return LocalDaikin(IP, options=options)
 
 
-def test_option_off_never_triggers():
+T0 = time.time()
+D = POST_OFF_DRYING_START_DELAY
+
+
+def _off_from(prev: HVACMode, **fields) -> LocalDaikin:
+    """Entity that just went OFF after `prev`, armed on the first poll."""
+    entity = _entity()
+    entity._hvac_mode = HVACMode.OFF
+    entity._pre_transition_mode = prev
+    for key, value in fields.items():
+        setattr(entity, key, value)
+    return entity
+
+
+def _armed(source=None, **fields) -> LocalDaikin:
+    entity = _off_from(HVACMode.COOL, _last_ope_type=source, **fields)
+    entity._process_post_off_drying(now=T0)
+    assert entity._drying_phase == "waiting"
+    return entity
+
+
+def _drying(source=100, deadline=None) -> LocalDaikin:
+    entity = _entity()
+    entity._drying_phase = "drying"
+    entity._drying_deadline = deadline if deadline is not None else T0 + 3600
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    entity._last_ope_type = source
+    return entity
+
+
+def _rejected() -> MagicMock:
+    post = MagicMock()
+    post.return_value.json.return_value = {"responses": [{"rsc": 3002}]}
+    return post
+
+
+def test_option_off_never_arms():
     entity = _entity(option=False)
+    entity._hvac_mode = HVACMode.OFF
     entity._pre_transition_mode = HVACMode.COOL
     with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
+        entity._process_post_off_drying(now=T0)
     assert entity._drying_phase is None
     post.assert_not_called()
 
 
-def test_cool_to_off_enters_waiting():
-    entity = _entity()
-    entity._pre_transition_mode = HVACMode.COOL
-    entity._local_off_pending = True
+def test_cool_off_arms_waiting_without_sending():
+    entity = _off_from(HVACMode.COOL)
     with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
+        entity._process_post_off_drying(now=T0)
     assert entity._drying_phase == "waiting"
-    assert entity._drying_step_after > time.time() + POST_OFF_DRYING_START_DELAY - 5
-    assert entity._local_off_pending is False  # consumed
-    post.assert_not_called()  # no command yet, next poll confirms it is still off
+    assert entity._drying_step_after == T0 + D
+    post.assert_not_called()
 
 
-def test_dry_to_off_enters_waiting():
-    entity = _entity()
-    entity._pre_transition_mode = HVACMode.DRY
-    entity._local_off_pending = True
-    entity._process_post_off_drying(now=time.time())
+def test_dry_off_arms_waiting():
+    entity = _off_from(HVACMode.DRY)
+    entity._process_post_off_drying(now=T0)
     assert entity._drying_phase == "waiting"
 
 
-def test_heat_to_off_does_not_trigger():
-    entity = _entity()
-    entity._pre_transition_mode = HVACMode.HEAT
-    entity._process_post_off_drying(now=time.time())
+@pytest.mark.parametrize("prev", [HVACMode.HEAT, HVACMode.FAN_ONLY])
+def test_heat_or_fan_off_does_not_arm(prev):
+    entity = _off_from(prev)
+    entity._process_post_off_drying(now=T0)
     assert entity._drying_phase is None
 
 
-def test_fan_to_off_does_not_trigger():
-    entity = _entity()
-    entity._pre_transition_mode = HVACMode.FAN_ONLY
-    entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-
-
-def test_waiting_does_not_write_before_delay():
-    """The unit needs time to finish its own shutdown: nothing is sent until
-    the start delay has elapsed, even if another poll comes in right away."""
-    entity = _entity()
-    entity._drying_phase = "waiting"
-    now = time.time()
-    entity._drying_step_after = now + POST_OFF_DRYING_START_DELAY
+def test_waiting_does_not_decide_before_delay():
+    entity = _armed(source=100)
     with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=now + 2)
+        entity._process_post_off_drying(now=T0 + 2)
     assert entity._drying_phase == "waiting"
     post.assert_not_called()
 
 
-def test_waiting_confirms_off_and_starts_fan_only():
-    entity = _entity()
-    entity._drying_phase = "waiting"
-    now = time.time()
+def test_remote_off_skipped_after_delay(caplog):
+    entity = _armed(source=1)
+    with caplog.at_level(logging.DEBUG), patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + D)
+        entity._process_post_off_drying(now=T0 + D + 60)
+    assert entity._drying_phase is None
+    post.assert_not_called()
+    assert sum("remote" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_local_off_starts_fan_only():
+    entity = _armed(source=100)
+    now = T0 + D
     with patch(POST_PATH, _accepted_post()) as post:
         entity._process_post_off_drying(now=now)
-    assert entity._drying_phase == "quiet"
-    assert entity._drying_deadline is not None and entity._drying_deadline > now
-    assert entity._drying_step_after >= now + POST_OFF_DRYING_START_DELAY
-    payload = post.call_args.kwargs["json"]
-    assert all(r["to"] == INDOOR for r in payload["requests"])
-    # fan-only mode + power on only: the unit resets the fan speed when the
-    # mode changes, so quiet is sent as a separate request afterwards
-    assert _leaves(payload) == [("p_01", "0000"), ("p_01", "01")]
+    post.assert_called_once()
+    # fan-only mode + power on only; no fan speed write (p_28)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "0000"), ("p_01", "01")]
+    assert entity._drying_phase == "drying"
+    assert entity._drying_deadline == now + 60 * 60
     assert entity._hvac_mode == HVACMode.FAN_ONLY
 
 
-def test_quiet_is_not_sent_before_delay():
-    entity = _entity()
-    entity._drying_phase = "quiet"
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    now = time.time()
-    entity._drying_deadline = now + 600
-    entity._drying_step_after = now + POST_OFF_DRYING_START_DELAY
-    with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=now + 2)
-    assert entity._drying_phase == "quiet"
-    post.assert_not_called()
-
-
-def test_quiet_sent_as_separate_request_after_delay():
-    entity = _entity()
-    entity._drying_phase = "quiet"
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    now = time.time()
-    entity._drying_deadline = now + 600
-    entity._drying_step_after = now - 1
-    with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=now)
-    assert entity._drying_phase == "drying"
-    assert _leaves(post.call_args.kwargs["json"]) == [("p_28", "0B00")]
-    assert entity._fan_mode == HAFanMode.FAN_QUIET
-
-
-def test_rejected_quiet_write_retries_next_poll():
-    entity = _entity()
-    entity._drying_phase = "quiet"
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    now = time.time()
-    entity._drying_deadline = now + 600
-    entity._drying_step_after = now - 1
-    rejected = MagicMock()
-    rejected.return_value.json.return_value = {"responses": [{"rsc": 3002}]}
-    with patch(POST_PATH, rejected):
-        entity._process_post_off_drying(now=now)  # caught, no raise
-    assert entity._drying_phase == "quiet"
+def test_app_off_starts_fan_only():
+    entity = _armed(source=200)
     with patch(POST_PATH, _accepted_post()):
-        entity._process_post_off_drying(now=now)
+        entity._process_post_off_drying(now=T0 + D)
     assert entity._drying_phase == "drying"
 
 
-def test_quiet_phase_cancelled_when_unit_restarts():
-    entity = _entity()
-    entity._drying_phase = "quiet"
+def test_missing_source_dries():
+    entity = _armed(source=None)
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0 + D)
+    assert entity._drying_phase == "drying"
+
+
+@pytest.mark.parametrize("minutes", [1, 2])
+def test_off_timer_dries_even_with_remote_source(minutes):
+    entity = _armed(source=1, _last_on_timer_minutes=minutes)
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0 + D)
+    assert entity._drying_phase == "drying"
+
+
+def test_remote_off_with_distant_timer_skipped():
+    entity = _armed(source=1, _last_on_timer_minutes=30)
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + D)
+    assert entity._drying_phase is None
+    post.assert_not_called()
+
+
+def test_stale_source_on_first_off_poll_does_not_decide():
+    entity = _armed(source=1)  # last_ope still shows the previous remote op
+    entity._last_ope_type = 100  # caught up with the HA off by the delay poll
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0 + D)
+    assert entity._drying_phase == "drying"
+
+
+def test_waiting_cancelled_when_unit_back_on():
+    entity = _armed(source=100)
     entity._hvac_mode = HVACMode.COOL
-    entity._drying_deadline = time.time() + 600
-    entity._drying_step_after = time.time() - 1
     with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
+        entity._process_post_off_drying(now=T0 + D)
     assert entity._drying_phase is None
     post.assert_not_called()
 
 
-def test_deadline_powers_off_even_if_quiet_never_sent():
-    entity = _entity()
-    entity._drying_phase = "quiet"
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    entity._drying_deadline = time.time() - 1
-    with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
-
-
-def test_external_off_logged_once_per_transition(caplog):
-    entity = _entity()
-    entity._pre_transition_mode = HVACMode.COOL
-    with caplog.at_level(logging.DEBUG):
-        for _ in range(3):  # unit stays off across several polls
-            entity._process_post_off_drying(now=time.time())
-    assert caplog.text.count("external off detected") == 1
-
-
-def test_own_drying_finish_is_not_logged_as_external_off(caplog):
-    entity = _entity()
-    entity._drying_phase = "drying"
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    entity._drying_deadline = time.time() - 1
-    with patch(POST_PATH, _accepted_post()), caplog.at_level(logging.DEBUG):
-        entity._process_post_off_drying(now=time.time())  # finishes, powers off
-        entity._process_post_off_drying(now=time.time())  # next poll, still off
-    assert "external off detected" not in caplog.text
-
-
-def test_waiting_cancelled_when_unit_restarts():
-    entity = _entity()
+def test_duration_option_used():
+    entity = _entity(minutes=5)
+    entity._hvac_mode = HVACMode.OFF
     entity._drying_phase = "waiting"
-    entity._hvac_mode = HVACMode.COOL  # user took over or unit auto-started
-    with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-    post.assert_not_called()
-
-
-def test_drying_waits_until_deadline():
-    entity = _entity()
-    entity._drying_phase = "drying"
-    entity._drying_deadline = time.time() + 3600
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase == "drying"
-    post.assert_not_called()
+    entity._last_ope_type = 100
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0)
+    assert entity._drying_deadline == T0 + 300
 
 
 def test_drying_powers_off_at_deadline():
-    entity = _entity()
-    entity._drying_phase = "drying"
-    entity._drying_deadline = time.time() - 1
-    entity._hvac_mode = HVACMode.FAN_ONLY
+    entity = _drying(deadline=T0)
     with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-    leaves = _leaves(post.call_args.kwargs["json"])
-    assert leaves == [("p_01", "00")]
-    assert entity._pre_transition_mode == HVACMode.OFF  # no immediate re-trigger
-
-
-def test_drying_cancelled_when_mode_changed():
-    entity = _entity()
-    entity._drying_phase = "drying"
-    entity._hvac_mode = HVACMode.COOL
-    with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-    post.assert_not_called()
-
-
-def test_drying_cancelled_when_powered_off():
-    entity = _entity()
-    entity._drying_phase = "drying"
-    entity._hvac_mode = HVACMode.OFF  # user switched it off mid-drying
-    with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-    post.assert_not_called()
-
-
-def test_external_off_is_skipped():
-    """IR remote (or app) off runs the built-in MOLD PROOF; we must not pile
-    a drying cycle on top of it. Only locally-sent off triggers the sequence."""
-    entity = _entity()
-    entity._pre_transition_mode = HVACMode.COOL
-    # poll confirms off without a locally-sent off (remote did it)
-    entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-
-
-def test_local_off_triggers_sequence():
-    entity = _entity()
-    entity._pre_transition_mode = HVACMode.COOL
-    with patch(POST_PATH, _accepted_post()):
-        entity.turn_off()  # local WiFi off — built-in cycle will NOT run
-    with patch(POST_PATH, _accepted_post()) as post:
-        entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase == "waiting"
-    post.assert_not_called()
-
-
-def test_rejected_start_write_retries_next_poll():
-    """A rejected fan-only write must not consume the sequence: the phase
-    stays 'waiting' and the next poll retries the command."""
-    entity = _entity()
-    entity._drying_phase = "waiting"
-    rejected = MagicMock()
-    rejected.return_value.json.return_value = {"responses": [{"rsc": 3002}]}
-    with patch(POST_PATH, rejected):
-        entity._process_post_off_drying(now=time.time())  # caught, no raise
-    assert entity._drying_phase == "waiting"
-    assert entity._hvac_mode != HVACMode.FAN_ONLY
-    with patch(POST_PATH, _accepted_post()):
-        entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase == "quiet"
-
-
-def test_rejected_off_at_deadline_retries_next_poll():
-    """A rejected power-off at the deadline must not clear the phase: the
-    unit must not run fan-only forever."""
-    entity = _entity()
-    entity._drying_phase = "drying"
-    entity._drying_deadline = time.time() - 1
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    rejected = MagicMock()
-    rejected.return_value.json.return_value = {"responses": [{"rsc": 3002}]}
-    with patch(POST_PATH, rejected):
-        entity._process_post_off_drying(now=time.time())  # raises
-    assert entity._drying_phase == "drying"  # still armed, will retry
-    with patch(POST_PATH, _accepted_post()):
-        entity._process_post_off_drying(now=time.time())
+        entity._process_post_off_drying(now=T0)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
     assert entity._drying_phase is None
     assert entity._hvac_mode == HVACMode.OFF
 
 
-def test_local_off_during_active_drying_cannot_leak():
-    """A local off fired during an active sequence (phase drying) sets the
-    flag; the cancel must clear it so a later remote off is not armed."""
-    entity = _entity()
-    entity._drying_phase = "drying"
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    with patch(POST_PATH, _accepted_post()):
-        entity.turn_off()  # user stops the drying mid-cycle
-    assert entity._local_off_pending is True
-    # next poll: unit off -> sequence cancelled, stale flag must be dropped
-    entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-    assert entity._local_off_pending is False
+def test_drying_waits_until_deadline():
+    entity = _drying(deadline=T0 + 100)
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+    assert entity._drying_phase == "drying"
+    post.assert_not_called()
 
 
-def test_local_off_from_heat_consumes_flag():
-    """A local off that never arms (unit was in HEAT) must not leave a stale
-    flag behind: it is consumed as soon as the off is seen in the poll."""
-    entity = _entity()
-    entity._pre_transition_mode = HVACMode.HEAT
-    with patch(POST_PATH, _accepted_post()):
-        entity.turn_off()
-    assert entity._local_off_pending is True
-    entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-    assert entity._local_off_pending is False
-
-
-def test_stale_flag_does_not_leak_into_later_remote_off():
-    """Local off from FAN_ONLY (no sequence) -> remote cools -> remote off.
-    The first off's flag must not arm the sequence on the remote off, or we
-    would pile drying on top of the unit's own MOLD PROOF cycle."""
-    entity = _entity()
-    entity._hvac_mode = HVACMode.FAN_ONLY
-    entity._pre_transition_mode = HVACMode.FAN_ONLY
-    with patch(POST_PATH, _accepted_post()):
-        entity.turn_off()  # local, but prev=FAN_ONLY -> never arms
-    entity._process_post_off_drying(now=time.time())
-    assert entity._drying_phase is None
-    # remote turns it on and cools, then switches it off — no HA involvement
+def test_drying_cancelled_on_mode_change(caplog):
+    entity = _drying()
     entity._hvac_mode = HVACMode.COOL
-    entity._process_post_off_drying(now=time.time())
-    entity._hvac_mode = HVACMode.OFF
-    entity._process_post_off_drying(now=time.time())
+    with caplog.at_level(logging.INFO):
+        entity._process_post_off_drying(now=T0)
     assert entity._drying_phase is None
+    assert "cancelled" in caplog.text
+
+
+def test_drying_cancelled_when_switched_off():
+    entity = _drying()
+    entity._hvac_mode = HVACMode.OFF
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+        assert entity._drying_phase is None
+        entity._process_post_off_drying(now=T0 + 60)  # must not re-arm
+    assert entity._drying_phase is None
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("source", [1, 200])
+def test_remote_or_app_operation_during_drying_cancels(source):
+    entity = _drying(source=source, deadline=T0)  # deadline passed: must not power off
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + 1)
+    assert entity._drying_phase is None
+    post.assert_not_called()
+    assert entity._hvac_mode == HVACMode.FAN_ONLY  # unit left running
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda e: e.set_fan_mode("Auto"),
+        lambda e: e.set_swing_mode("off"),
+        lambda e: e.set_temperature(24),
+        lambda e: e.turn_on(),
+    ],
+)
+def test_ha_service_call_during_drying_cancels(call):
+    entity = _drying()
+    with patch(POST_PATH, _accepted_post()):
+        call(entity)
+    assert entity._drying_phase is None
+
+
+def test_rejected_start_retries_next_poll():
+    entity = _armed(source=100)
+    with patch(POST_PATH, _rejected()):
+        entity._process_post_off_drying(now=T0 + D)
+    assert entity._drying_phase == "waiting"
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0 + D + 60)
+    assert entity._drying_phase == "drying"
+
+
+def test_rejected_power_off_retries_next_poll():
+    entity = _drying(deadline=T0)
+    with patch(POST_PATH, _rejected()):
+        entity._process_post_off_drying(now=T0)
+    assert entity._drying_phase == "drying"
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0 + 60)
+    assert entity._drying_phase is None
+
+
+def test_parse_timer_minutes():
+    assert LocalDaikin.parse_timer_minutes("4E00") == 78
+    assert LocalDaikin.parse_timer_minutes("0100") == 1
+    assert LocalDaikin.parse_timer_minutes("0000") == 0
+    assert LocalDaikin.parse_timer_minutes(None) is None
+    assert LocalDaikin.parse_timer_minutes("zz") is None
 
 
 def test_full_cycle_through_update():
     """Wiring check: update() drives the state machine from real polls."""
     entity = _entity()
     with patch(POST_PATH) as post:
-        # unit cooling
-        post.return_value.json.return_value = _status_response(HVACMode.COOL, "01")
+        post.return_value.json.return_value = _status_response(
+            HVACMode.COOL, "01", source=1, timer="0000"
+        )
         entity.update()
         assert entity.hvac_mode == HVACMode.COOL
 
-        # HA turns it off (local) — off visible on the next poll
+        # HA turns it off; first OFF poll still reports the old source
         post.return_value.json.return_value = {"responses": [{"rsc": 2004}]}
         entity.turn_off()
-        post.return_value.json.return_value = _status_response(HVACMode.COOL, "00")
+        post.return_value.json.return_value = _status_response(
+            HVACMode.COOL, "00", source=1
+        )
         entity.update()
         assert entity._drying_phase == "waiting"
 
-        # still off, delay elapsed — fan-only + power on
-        entity._drying_step_after = time.time() - 1
-        entity.update()
-        assert entity._drying_phase == "quiet"
-        leaves = _leaves(post.call_args.kwargs["json"])
-        assert leaves == [("p_01", "0000"), ("p_01", "01")]
-
-        # unit now fan-only, delay elapsed — quiet as its own request
-        post.return_value.json.return_value = _status_response(HVACMode.FAN_ONLY, "01")
+        # delay elapsed, last_ope has caught up: fan-only + power on
+        post.return_value.json.return_value = _status_response(
+            HVACMode.COOL, "00", source=100
+        )
         entity._drying_step_after = time.time() - 1
         entity.update()
         assert entity._drying_phase == "drying"
-        assert _leaves(post.call_args.kwargs["json"]) == [("p_28", "0B00")]
+        leaves = _leaves(post.call_args.kwargs["json"])
+        assert leaves == [("p_01", "0000"), ("p_01", "01")]
 
-        # deadline passes while fan-only is running — power off
+        # deadline passes while fan-only is running: power off
+        post.return_value.json.return_value = _status_response(
+            HVACMode.FAN_ONLY, "01", source=100
+        )
         entity._drying_deadline = time.time() - 1
-        post.return_value.json.return_value = _status_response(HVACMode.FAN_ONLY, "01")
         entity.update()
         assert entity._drying_phase is None
-        leaves = _leaves(post.call_args.kwargs["json"])
-        assert leaves == [("p_01", "00")]
+        assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
+        assert entity._hvac_mode == HVACMode.OFF
