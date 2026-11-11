@@ -201,6 +201,11 @@ class LocalDaikin(ClimateEntity):
         )
         # Post-off drying state machine (mold-proof workaround). Driven by the
         # 60s poll; no timers or extra HTTP calls.
+        # The flag distinguishes an off this integration sent (the built-in
+        # MOLD PROOF cycle does not run after a WiFi off, so our drying
+        # sequence is wanted) from an external off (remote/app — the unit
+        # runs its own 60-minute MOLD PROOF cycle and we must stay out).
+        self._local_off_pending: bool = False
         self._drying_phase: str | None = None  # None | "waiting" | "drying"
         self._drying_deadline: float | None = None
         self._pre_transition_mode: HVACMode | None = HVACMode.OFF
@@ -358,7 +363,10 @@ class LocalDaikin(ClimateEntity):
         """Advance the post-off drying state machine on each poll.
 
         Phases:
-          None     -> waiting   on a COOL/DRY -> OFF transition (option on)
+          None     -> waiting   on a COOL/DRY -> OFF transition (option on),
+                                but only when this integration sent the off
+                                (external off: the unit runs its own MOLD
+                                PROOF cycle, so the sequence is skipped)
           waiting  -> drying   if the unit is still OFF (fan-only + quiet sent)
           waiting  -> None     if the unit is on again (user took over)
           drying   -> None     at deadline (power off) or if the mode is no
@@ -372,12 +380,21 @@ class LocalDaikin(ClimateEntity):
                 self._hvac_mode == HVACMode.OFF
                 and self._pre_transition_mode in (HVACMode.COOL, HVACMode.DRY)
             ):
-                _LOGGER.info(
-                    "Daikin %s: %s off — starting post-off drying sequence",
-                    self._ip,
-                    self._pre_transition_mode.value,
-                )
-                self._drying_phase = "waiting"
+                if self._local_off_pending:
+                    self._local_off_pending = False
+                    _LOGGER.info(
+                        "Daikin %s: %s off via this integration — starting "
+                        "post-off drying sequence",
+                        self._ip,
+                        self._pre_transition_mode.value,
+                    )
+                    self._drying_phase = "waiting"
+                else:
+                    _LOGGER.debug(
+                        "Daikin %s: external off detected — built-in MOLD "
+                        "PROOF cycle will run, post-off drying skipped",
+                        self._ip,
+                    )
             self._pre_transition_mode = self._hvac_mode
             return
 
@@ -564,9 +581,13 @@ class LocalDaikin(ClimateEntity):
         _LOGGER.info("Turned off")
         self._hvac_mode = HVACMode.OFF  # optimistic
         self._update_state(False)
+        # Set only once the off was accepted: a rejected command must not
+        # later arm the drying sequence for an unrelated remote off.
+        self._local_off_pending = True
 
     def turn_on(self):
         _LOGGER.info("Turned on")
+        self._local_off_pending = False
         self._update_state(True)
 
     def get_swing_state(self, data: dict) -> str:

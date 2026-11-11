@@ -83,15 +83,18 @@ def test_option_off_never_triggers():
 def test_cool_to_off_enters_waiting():
     entity = _entity()
     entity._pre_transition_mode = HVACMode.COOL
+    entity._local_off_pending = True
     with patch(POST_PATH, _accepted_post()) as post:
         entity._process_post_off_drying(now=time.time())
     assert entity._drying_phase == "waiting"
+    assert entity._local_off_pending is False  # consumed
     post.assert_not_called()  # no command yet, next poll confirms it is still off
 
 
 def test_dry_to_off_enters_waiting():
     entity = _entity()
     entity._pre_transition_mode = HVACMode.DRY
+    entity._local_off_pending = True
     entity._process_post_off_drying(now=time.time())
     assert entity._drying_phase == "waiting"
 
@@ -180,6 +183,42 @@ def test_drying_cancelled_when_powered_off():
     post.assert_not_called()
 
 
+def test_external_off_is_skipped():
+    """IR remote (or app) off runs the built-in MOLD PROOF; we must not pile
+    a drying cycle on top of it. Only locally-sent off triggers the sequence."""
+    entity = _entity()
+    entity._pre_transition_mode = HVACMode.COOL
+    # poll confirms off without a locally-sent off (remote did it)
+    entity._process_post_off_drying(now=time.time())
+    assert entity._drying_phase is None
+
+
+def test_local_off_triggers_sequence():
+    entity = _entity()
+    entity._pre_transition_mode = HVACMode.COOL
+    with patch(POST_PATH, _accepted_post()):
+        entity.turn_off()  # local WiFi off — built-in cycle will NOT run
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=time.time())
+    assert entity._drying_phase == "waiting"
+    post.assert_not_called()
+
+
+def test_stale_local_off_flag_cleared_by_next_on():
+    """A local off that never armed (e.g. unit was in HEAT) must not leak into
+    a later IR-remote off: the following on clears the flag."""
+    entity = _entity()
+    entity._pre_transition_mode = HVACMode.HEAT  # off-from-heat never arms
+    with patch(POST_PATH, _accepted_post()):
+        entity.turn_off()  # sets the flag
+    entity._process_post_off_drying(now=time.time())
+    assert entity._drying_phase is None
+    # user restarts — the stale flag must be gone
+    with patch(POST_PATH, _accepted_post()):
+        entity.turn_on()
+    assert entity._local_off_pending is False
+
+
 def test_full_cycle_through_update():
     """Wiring check: update() drives the state machine from real polls."""
     entity = _entity()
@@ -189,7 +228,9 @@ def test_full_cycle_through_update():
         entity.update()
         assert entity.hvac_mode == HVACMode.COOL
 
-        # HA (or anything) turns it off — still visible as off next poll
+        # HA turns it off (local) — off visible on the next poll
+        post.return_value.json.return_value = {"responses": [{"rsc": 2004}]}
+        entity.turn_off()
         post.return_value.json.return_value = _status_response(HVACMode.COOL, "00")
         entity.update()
         assert entity._drying_phase == "waiting"
