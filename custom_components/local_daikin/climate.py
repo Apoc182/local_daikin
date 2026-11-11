@@ -117,6 +117,16 @@ HVAC_TO_TEMP_HEX = {
 REVERSE_MODE_MAP = {v: k for k, v in MODE_MAP.items()}
 REVERSE_FAN_MODE_MAP = {v: k for k, v in FAN_MODE_MAP.items()}
 
+# Feature toggles: feature -> (resource, path nodes after dgc_status, pn).
+# Values are "00" (off) / "01" (on) at every path.
+FEATURE_MAP = {
+    "comfort": ("/dsiot/edge/adr_0100.dgc_status", ["e_1002", "e_3003"], "p_1D"),
+    "econo": ("/dsiot/edge/adr_0100.dgc_status", ["e_1002", "e_3003"], "p_24"),
+    "outdoor_quiet": ("/dsiot/edge/adr_0200.dgc_status", ["e_1003", "e_3002"], "p_3D"),
+    "powerful": ("/dsiot/edge/adr_0200.dgc_status", ["e_1003", "e_3002"], "p_44"),
+}
+FEATURE_EXCLUSIVE_TRIO = ("comfort", "econo", "outdoor_quiet")
+
 @dataclass
 class DaikinRequest:
     attributes: list[DaikinAttribute] = field(default_factory=list)
@@ -244,6 +254,8 @@ class LocalDaikin(ClimateEntity):
         self._current_humidity = None
         self._runtime_today = None
         self._energy_today = None
+        # "on" / "off" / None (not exposed by this model)
+        self._features = {feature: None for feature in FEATURE_MAP}
         self._mac = None
         self._max_temp = 30 # may need some logic to set this based on the device ID
         self._min_temp = 10
@@ -610,6 +622,46 @@ class LocalDaikin(ClimateEntity):
             self._drying_fan_pending = False
             self._fan_mode = HAFanMode.FAN_AUTO  # optimistic
 
+    def set_feature(self, feature: str, on: bool) -> None:
+        """Turn a feature toggle on or off, enforcing hardware exclusivity.
+
+        Powerful and {comfort, econo, outdoor_quiet} cannot be active at the
+        same time: enabling one side clears the active members of the other,
+        mirroring the remote's last-button-pressed-wins behaviour. Members
+        whose cached state is unknown are left untouched.
+        """
+        if feature not in FEATURE_MAP:
+            raise Exception(f"Unknown feature {feature}")
+
+        state = "on" if on else "off"
+        if self._features[feature] == state:
+            return  # no-op: nothing to send, no state change
+
+        to, path, pn = FEATURE_MAP[feature]
+        attributes = [
+            DaikinAttribute(pn, "01" if on else "00", path, to)
+        ]
+
+        # Collect exclusions to send in the same request.
+        if feature == "powerful" and on:
+            exclusives = FEATURE_EXCLUSIVE_TRIO
+        elif feature in FEATURE_EXCLUSIVE_TRIO and on:
+            exclusives = ("powerful",)
+        else:
+            exclusives = ()
+
+        for exclusive in exclusives:
+            if self._features[exclusive] == "on":
+                excl_to, excl_path, excl_pn = FEATURE_MAP[exclusive]
+                attributes.append(
+                    DaikinAttribute(excl_pn, "00", excl_path, excl_to)
+                )
+                self._features[exclusive] = "off"
+
+        self._features[feature] = state  # optimistic
+        self._send_attribute(DaikinRequest(attributes).serialize())
+
+
     @property
     def temperature_unit(self):
         """Return the unit of measurement."""
@@ -650,10 +702,12 @@ class LocalDaikin(ClimateEntity):
 
     @property
     def extra_state_attributes(self):
+        features = dict(self._features)
         return {
             "outside_temperature": self._outside_temperature,
             "runtime_today": self._runtime_today,
-            "energy_today": self._energy_today
+            "energy_today": self._energy_today,
+            **features
         }
 
     @property
@@ -961,6 +1015,20 @@ class LocalDaikin(ClimateEntity):
             )
             if runtime_today is not None:
                 self._runtime_today = runtime_today
+
+            for feature, (to, path, pn) in FEATURE_MAP.items():
+                raw = self.try_find_value_by_pn(data, to, "dgc_status", *path, pn)
+                if raw == "01":
+                    self._features[feature] = "on"
+                elif raw == "00":
+                    self._features[feature] = "off"
+                elif raw is not None:
+                    _LOGGER.debug(
+                        "Daikin %s: unknown feature value for %s: %s",
+                        self._ip,
+                        feature,
+                        raw,
+                    )
 
             # The state machine never raises: it catches its own command rejections and
             # retries on the next poll, so a failed command does not take a

@@ -12,6 +12,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities([
         DaikinPowerSwitch(hass, entry.entry_id, entry.data["ip_address"]),
         DaikinQuietFanSwitch(hass, entry.entry_id, entry.data["ip_address"]),
+        DaikinComfortSwitch(hass, entry.entry_id, entry.data["ip_address"]),
+        DaikinEconoSwitch(hass, entry.entry_id, entry.data["ip_address"]),
+        DaikinOutdoorQuietSwitch(hass, entry.entry_id, entry.data["ip_address"]),
+        DaikinPowerfulSwitch(hass, entry.entry_id, entry.data["ip_address"]),
     ])
 
 
@@ -68,6 +72,99 @@ class DaikinPowerSwitch(SwitchEntity):
             name="Local Daikin AC",
             manufacturer="Daikin"
         )
+
+class DaikinFeatureSwitch(SwitchEntity):
+    """Base switch for a climate feature toggle (comfort, econo, ...).
+
+    Reads the cached feature state from the climate entity. A feature the
+    model does not expose stays unknown (is_on is None) instead of a fake off.
+    """
+
+    feature = None
+    name_suffix = None
+    unique_id_suffix = None
+
+    def __init__(self, hass, entry_id, ip):
+        self._hass = hass
+        self._entry_id = entry_id
+        self._ip = ip
+        self._state = None
+        self._attr_name = f"Daikin {self.name_suffix} ({ip})"
+        self._attr_unique_id = f"daikin_{self.unique_id_suffix}_{ip}"
+        self._attr_should_poll = True
+
+    def _get_climate_entity(self):
+        data = self._hass.data.get("local_daikin", {}).get(self._entry_id, {})
+        return data.get("climate_entity")
+
+    @property
+    def available(self):
+        entity = self._get_climate_entity()
+        return entity is not None and entity.available
+
+    def update(self):
+        """Read cached state from climate entity — no extra HTTP call."""
+        entity = self._get_climate_entity()
+        if entity is None:
+            return
+        self._state = (
+            None
+            if entity.extra_state_attributes.get(self.feature) is None
+            else entity.extra_state_attributes[self.feature] == "on"
+        )
+
+    def turn_on(self, **kwargs):
+        entity = self._get_climate_entity()
+        if entity is None:
+            return
+        entity.set_feature(self.feature, True)
+        self._state = True
+        self.schedule_update_ha_state(force_refresh=True)
+
+    def turn_off(self, **kwargs):
+        entity = self._get_climate_entity()
+        if entity is None:
+            return
+        entity.set_feature(self.feature, False)
+        self._state = False
+        self.schedule_update_ha_state(force_refresh=True)
+
+    @property
+    def is_on(self):
+        return self._state
+
+    @property
+    def device_info(self):
+        return DeviceInfo(
+            identifiers={("local_daikin", self._ip)},
+            name="Local Daikin AC",
+            manufacturer="Daikin"
+        )
+
+
+class DaikinComfortSwitch(DaikinFeatureSwitch):
+    feature = "comfort"
+    name_suffix = "Comfort Airflow"
+    unique_id_suffix = "comfort"
+
+
+class DaikinEconoSwitch(DaikinFeatureSwitch):
+    feature = "econo"
+    name_suffix = "Econo"
+    unique_id_suffix = "econo"
+
+
+class DaikinOutdoorQuietSwitch(DaikinFeatureSwitch):
+    feature = "outdoor_quiet"
+    name_suffix = "Outdoor Unit Quiet"
+    unique_id_suffix = "outdoor_quiet"
+
+
+class DaikinPowerfulSwitch(DaikinFeatureSwitch):
+    feature = "powerful"
+    name_suffix = "Powerful"
+    unique_id_suffix = "powerful"
+
 
 class DaikinQuietFanSwitch(SwitchEntity):
     def __init__(self, hass, entry_id, ip):

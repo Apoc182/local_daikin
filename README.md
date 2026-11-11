@@ -43,7 +43,7 @@ results.
 
 - Full climate control (temperature, HVAC mode, fan, swing)
 - Extra entities:
-  - Switches: Power, Quiet Fan, Swing Mode
+  - Switches: Power, Quiet Fan, Swing Mode, Comfort Airflow, Econo, Outdoor Unit Quiet, Powerful
   - Select: HVAC Mode Fan Speed, Swing Mode
 
   - Sensors: Outdoor temperature, energy today, runtime today indoor temp, humidity
@@ -112,6 +112,17 @@ Limitations and risks:
 - The 60-minute default comes from the operation manuals of same-generation
   (firmware 2.8.0) Daikin units, not from a manual specific to the
   Yokozuna (橫綱V) model.
+
+### Feature switches (model-dependent)
+
+- **Comfort Airflow**, **Econo**, **Outdoor Unit Quiet** and **Powerful** are exposed as
+  switches when the unit's LAN adapter reports them. If your model does not expose
+  a feature, the switch shows as *unknown* rather than a fake off.
+- The hardware allows only one of Powerful or {Comfort Airflow, Econo, Outdoor Unit
+  Quiet} at a time, so turning one on clears the other side (last button pressed wins,
+  like the remote).
+- Powerful is cancelled by the unit after ~20 minutes on its own; the switch will
+  show as off on the next poll.
 
 ## Notes
 - If upgrading from v0.0.5 (or earlier), you will need to delete the manual configuration in your `configuration.yaml` and reconfigure via the Home Assistant devices panel.
