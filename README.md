@@ -64,11 +64,15 @@ COOL or DRY, Home Assistant turns the unit back into a fan-only (quiet fan)
 operation for **60 minutes** and powers it off again — drying the evaporator
 much like the built-in cycle.
 
-- If you switch the unit off with the **remote or the Daikin app**, the unit
-  runs its own MOLD PROOF cycle and the sequence is skipped — the API cannot
-  tell the two off events apart, but the integration knows whether *it* sent
-  the off, so it only compensates for the cases where the built-in cycle is
-  actually skipped.
+- If you switch the unit off with the **remote**, the unit runs its own
+  MOLD PROOF cycle and the sequence is skipped. The API cannot tell the two
+  off events apart, but the integration knows whether *it* sent the off, so
+  it only compensates for the cases where the built-in cycle is actually
+  skipped.
+- Limitation: switching the unit off from the **Daikin app** also skips the
+  built-in cycle, but an app off is indistinguishable from a remote off —
+  the sequence is skipped there too. If you want the drying sequence
+  guaranteed, switch the unit off from Home Assistant.
 - The sequence is cancelled automatically if you switch the unit on (or
   change its mode) during the 60 minutes.
 - Timing note: state changes are confirmed by the 60-second poll, so the
