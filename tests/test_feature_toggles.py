@@ -135,7 +135,9 @@ def test_enabling_comfort_disables_active_powerful():
     assert entity.extra_state_attributes["powerful"] == "off"
 
 
-def test_enabling_powerful_disables_active_trio():
+def test_enabling_powerful_disables_every_exposed_trio_member():
+    """A cached "off" may be stale (e.g. turned on by the remote since the
+    last poll), so every exposed member is cleared, not only cached "on"."""
     entity = LocalDaikin(IP)
     entity._features["comfort"] = "on"
     entity._features["econo"] = "on"
@@ -143,10 +145,10 @@ def test_enabling_powerful_disables_active_trio():
     with patch(POST_PATH, _accepted_post()) as post:
         entity.set_feature("powerful", True)
         leaves = _leaves(post.call_args.kwargs["json"])
-    assert ("p_44", "01") in leaves
-    assert ("p_1D", "00") in leaves
-    assert ("p_24", "00") in leaves
-    assert len(leaves) == 3  # outdoor_quiet was already off, no write
+    assert sorted(leaves) == sorted(
+        [("p_44", "01"), ("p_1D", "00"), ("p_24", "00"), ("p_3D", "00")]
+    )
+    assert entity.extra_state_attributes["outdoor_quiet"] == "off"
 
 
 def test_no_exclusion_write_when_cached_state_unknown():
@@ -362,3 +364,20 @@ def test_empty_responses_count_as_rejected():
     with patch(POST_PATH, post), pytest.raises(Exception, match="occured"):
         entity.set_feature("comfort", True)
     assert entity.extra_state_attributes["comfort"] is None
+
+
+def test_feature_switch_refreshes_climate_entity_state():
+    """The climate entity exposes the features as attributes; they must
+    update right after a write, not on the next climate poll."""
+    from unittest.mock import MagicMock
+
+    climate = LocalDaikin(IP)
+    climate.hass = _fake_hass(climate)  # added to HA, as in production
+    climate.schedule_update_ha_state = MagicMock()
+    switch = DaikinEconoSwitch(_fake_hass(climate), "entry-1", IP)
+    switch.hass = _fake_hass(climate)
+    switch.schedule_update_ha_state = MagicMock()
+    with patch(POST_PATH, _accepted_post()):
+        switch.turn_on()
+        switch.turn_off()
+    assert climate.schedule_update_ha_state.call_count == 2

@@ -127,6 +127,8 @@ class DaikinFeatureSwitch(SwitchEntity):
         if entity is None:
             return
         entity.set_feature(self.feature, True)
+        if entity.hass is not None:  # climate exposes features as attributes
+            entity.schedule_update_ha_state()
         self._state = True
         self.schedule_update_ha_state(force_refresh=True)
         # Turning a feature on may clear its exclusive counterparts.
@@ -139,6 +141,8 @@ class DaikinFeatureSwitch(SwitchEntity):
         if entity is None:
             return
         entity.set_feature(self.feature, False)
+        if entity.hass is not None:
+            entity.schedule_update_ha_state()
         self._state = False
         self.schedule_update_ha_state(force_refresh=True)
 

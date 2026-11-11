@@ -648,7 +648,9 @@ class LocalDaikin(ClimateEntity):
         else:
             exclusives = ()
 
-        cleared = [e for e in exclusives if self._features[e] == "on"]
+        # Clear every exposed member, not only cached "on": the cache may be
+        # stale. Unexposed (None) members are skipped to avoid a rejection.
+        cleared = [e for e in exclusives if self._features[e] is not None]
         for exclusive in cleared:
             excl_to, excl_path, excl_pn = FEATURE_MAP[exclusive]
             attributes.append(
