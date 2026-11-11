@@ -52,38 +52,46 @@ results.
 ### Post-off drying (mold proof)
 
 Daikin units run a "MOLD PROOF" internal-clean cycle (about 60 minutes of
-drying airflow) after COOL or DRY operation ends. The unit only runs it when
-switched off by the remote: the official manuals state the cycle is **skipped
-when the unit is turned off via a timer or a smartphone**, so switching off
-from Home Assistant does not trigger it.
+drying airflow) after COOL or DRY operation ends, but the official manuals
+state it is **skipped when the unit is turned off via a timer or a
+smartphone**. The integration offers an opt-in **post-off drying** option to
+compensate (open the integration entry, then *Options*): *Post-off drying
+(mold proof)* toggle and *Drying duration (minutes)* (5-180, default 60; a
+change applies from the next cycle).
 
-To compensate, the integration offers an opt-in **post-off drying** option
-(open the integration entry → *Options*). When enabled, after the unit is
-switched off **from Home Assistant** (not from the remote or app) while in
-COOL or DRY, Home Assistant turns the unit back into a fan-only (quiet fan)
-operation for **60 minutes** and powers it off again — drying the evaporator
-much like the built-in cycle.
+How it works:
 
-- If you switch the unit off with the **remote**, the unit runs its own
-  MOLD PROOF cycle and the sequence is skipped. The API cannot tell the two
-  off events apart, but the integration knows whether *it* sent the off, so
-  it only compensates for the cases where the built-in cycle is actually
-  skipped.
-- Limitation: switching the unit off from the **Daikin app** also skips the
-  built-in cycle, but an app off is indistinguishable from a remote off —
-  the sequence is skipped there too. If you want the drying sequence
-  guaranteed, switch the unit off from Home Assistant.
-- The sequence is cancelled automatically if you switch the unit on (or
-  change its mode) during the 60 minutes.
-- Timing note: the sequence is driven by the 60-second poll and pauses 30
-  seconds between steps, because the unit resets its fan speed when its mode
-  changes. After the off is seen, fan-only is started on the next poll (about
-  1-2 minutes after the off), the quiet fan speed is set as a separate step on
-  the poll after that, and the sequence ends within ~1 minute after the 60
-  minutes elapse.
-- The 60-minute duration matches the MOLD PROOF duration documented in the
-  official operation manuals for the same-generation (firmware 2.8.0) Daikin
-  units.
+- After a COOL or DRY operation is switched off, the integration checks the
+  source the unit reports for its last operation.
+  - **IR remote**: skipped, the unit runs its own MOLD PROOF cycle.
+  - **Home Assistant, Daikin app, OFF TIMER, or unknown source**: the unit is
+    switched to fan-only for the configured duration, then powered off. An
+    OFF TIMER off is detected by the unit's off-timer having 1-2 minutes left.
+- Fan speed and swing are not changed.
+- Timing: the drying starts about 30 seconds after the off is seen (decided on
+  the next 60-second poll).
+- Drying is cancelled (or handed over) if the unit is switched off or changed
+  to another mode from any source, if the remote or app operates it during
+  drying (the fan keeps running and you switch it off yourself), or on any
+  Home Assistant climate action during drying.
+- The sensor **Daikin Post-off Drying End (<ip>)** shows the end time while
+  drying, and is unknown otherwise.
+- Drying survives a Home Assistant restart, reload, or options save: it
+  resumes, or powers the unit off if the end time already passed. Removing the
+  integration entry mid-drying powers the unit off.
+
+Limitations and risks:
+
+- If Home Assistant is down or unreachable across the end time, the
+  integration files are deleted without removing the entry, or a storage write
+  fails, the unit keeps blowing until you switch it off.
+- The unit reports only its last operation: e.g. a remote off followed within
+  one poll by an app change causes an extra cycle on top of MOLD PROOF. A
+  remote off in the last ~2 minutes of a pending OFF TIMER counts as a timer
+  off.
+- The 60-minute default comes from the operation manuals of same-generation
+  (firmware 2.8.0) Daikin units, not from a manual specific to the
+  Yokozuna (橫綱V) model.
 
 ## Notes
 - If upgrading from v0.0.5 (or earlier), you will need to delete the manual configuration in your `configuration.yaml` and reconfigure via the Home Assistant devices panel.
