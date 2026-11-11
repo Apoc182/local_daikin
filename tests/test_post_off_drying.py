@@ -367,3 +367,155 @@ def test_full_cycle_through_update():
         assert entity._drying_phase is None
         assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
         assert entity._hvac_mode == HVACMode.OFF
+
+
+class FakeStore:
+    def __init__(self, fail: bool = False, log: list | None = None):
+        self.saved: list[float | None] = []
+        self.fail = fail
+        self.log = log
+
+    def save(self, deadline):
+        if self.fail:
+            raise OSError("disk full")
+        self.saved.append(deadline)
+        if self.log is not None:
+            self.log.append("save")
+
+
+def _with_store(entity: LocalDaikin, store: FakeStore) -> LocalDaikin:
+    entity._store = store
+    return entity
+
+
+def test_record_saved_before_fan_only_sent():
+    order: list = []
+    store = FakeStore(log=order)
+    entity = _with_store(_armed(source=100), store)
+    post = _accepted_post()
+    post.side_effect = lambda *a, **k: (order.append("post"), post.return_value)[1]
+    with patch(POST_PATH, post):
+        entity._process_post_off_drying(now=T0 + D)
+    assert store.saved == [T0 + D + entity._drying_seconds]
+    assert order[0] == "save" and "post" in order
+
+
+def test_store_failure_blocks_start_and_retries():
+    store = FakeStore(fail=True)
+    entity = _with_store(_armed(source=100), store)
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + D)
+    post.assert_not_called()
+    assert entity._drying_phase == "waiting"
+    store.fail = False
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0 + D + 60)
+    assert entity._drying_phase == "drying"
+
+
+def test_send_failure_clears_record():
+    store = FakeStore()
+    entity = _with_store(_armed(source=100), store)
+    with patch(POST_PATH, _rejected()):
+        entity._process_post_off_drying(now=T0 + D)
+    assert store.saved == [T0 + D + entity._drying_seconds, None]
+    assert entity._drying_phase == "waiting"
+
+
+def test_finish_clears_record():
+    store = FakeStore()
+    entity = _with_store(_drying(deadline=T0), store)
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0)
+    assert store.saved[-1] is None
+
+
+def test_cancel_clears_record():
+    store = FakeStore()
+    entity = _with_store(_drying(), store)
+    entity._hvac_mode = HVACMode.COOL
+    entity._process_post_off_drying(now=T0)
+    assert store.saved[-1] is None
+
+
+def test_restore_none_leaves_idle():
+    entity = _entity()
+    entity.restore_drying(None)
+    assert entity._drying_phase is None
+
+
+def test_restore_resumes_and_powers_off_after_deadline():
+    store = FakeStore()
+    entity = _with_store(_entity(), store)
+    entity.restore_drying(T0 - 1)
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    entity._last_ope_type = 100
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
+    assert store.saved[-1] is None
+
+
+def test_restore_discards_when_unit_not_fan_only():
+    store = FakeStore()
+    entity = _with_store(_entity(), store)
+    entity.restore_drying(T0 + 600)
+    entity._hvac_mode = HVACMode.OFF
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+    assert entity._drying_phase is None
+    post.assert_not_called()
+    assert store.saved[-1] is None
+
+
+def test_restored_cycle_runs_even_if_option_disabled():
+    entity = _entity(option=False)
+    entity.restore_drying(T0 - 1)
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    entity._last_ope_type = 100
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
+
+
+def test_missing_source_during_drying_keeps_counting():
+    entity = _drying(source=None)
+    with patch(POST_PATH, _accepted_post()):
+        entity._process_post_off_drying(now=T0)
+    assert entity._drying_phase == "drying"
+
+
+def test_deadline_passed_while_unreachable_powers_off_on_next_poll():
+    entity = _drying(deadline=T0 + 100)
+    # polls were skipped during the outage; the next one arrives after the deadline
+    with patch(POST_PATH, _accepted_post()) as post:
+        entity._process_post_off_drying(now=T0 + 5000)
+    assert _leaves(post.call_args.kwargs["json"]) == [("p_01", "00")]
+
+
+def test_ha_off_during_drying_clears_record_and_does_not_rearm():
+    store = FakeStore()
+    entity = _with_store(_drying(), store)
+    with patch(POST_PATH, _accepted_post()):
+        entity.turn_off()
+        assert store.saved[-1] is None
+        entity._process_post_off_drying(now=T0 + 60)
+    assert entity._drying_phase is None
+
+
+def test_unrecorded_fan_only_untouched():
+    entity = _entity()
+    entity._hvac_mode = HVACMode.FAN_ONLY
+    entity._last_ope_type = 100
+    with patch(POST_PATH, _accepted_post()) as post:
+        for i in range(3):
+            entity._process_post_off_drying(now=T0 + i * 3600)
+    post.assert_not_called()
+    assert entity._drying_phase is None
+
+
+def test_post_off_drying_end_property():
+    entity = _drying(deadline=T0 + 100)
+    end = entity.post_off_drying_end
+    assert end.tzinfo is not None and end.timestamp() == T0 + 100
+    assert _entity().post_off_drying_end is None

@@ -18,7 +18,7 @@ from time import time
 
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from .const import (
     CONF_POST_OFF_DRYING,
@@ -382,15 +382,34 @@ class LocalDaikin(ClimateEntity):
         )
 
 
+    def _persist(self, deadline: float | None) -> bool:
+        """Record the drying deadline (None clears it); False if the store failed."""
+        if self._store is None:
+            return True
+        try:
+            self._store.save(deadline)
+        except Exception as err:
+            _LOGGER.warning("Daikin %s: could not persist drying state (%s)", self._ip, err)
+            return False
+        return True
+
+    def restore_drying(self, deadline: float | None) -> None:
+        """Resume a cycle recorded before a restart; the next poll validates it."""
+        if deadline is not None:
+            self._drying_phase = "drying"
+            self._drying_deadline = deadline
+
+    @property
+    def post_off_drying_end(self) -> datetime | None:
+        if self._drying_phase != "drying":
+            return None
+        return datetime.fromtimestamp(self._drying_deadline, tz=UTC)
+
     def _cancel_drying(self, reason: str) -> None:
         _LOGGER.info("Daikin %s: post-off drying cancelled (%s)", self._ip, reason)
         self._drying_phase = None
         self._drying_deadline = None
-        if self._store is not None:
-            try:
-                self._store.save(None)
-            except Exception as err:
-                _LOGGER.warning("Daikin %s: could not clear drying state (%s)", self._ip, err)
+        self._persist(None)
 
     def _user_takeover(self) -> None:
         if self._drying_phase is not None:
@@ -447,6 +466,9 @@ class LocalDaikin(ClimateEntity):
                 self._pre_transition_mode = HVACMode.OFF
                 return
             deadline = now + self._drying_seconds
+            # Save before sending: a crash after the send must not lose the record.
+            if not self._persist(deadline):
+                return
             try:
                 self._send_attribute(
                     DaikinRequest(
@@ -472,6 +494,7 @@ class LocalDaikin(ClimateEntity):
                     "Daikin %s: post-off drying start failed, retrying next poll (%s)",
                     self._ip, err,
                 )
+                self._persist(None)
                 return
             self._drying_deadline = deadline
             self._drying_phase = "drying"
@@ -506,6 +529,7 @@ class LocalDaikin(ClimateEntity):
                 return
             self._drying_phase = None
             self._drying_deadline = None
+            self._persist(None)
             self._pre_transition_mode = HVACMode.OFF
             self._hvac_mode = HVACMode.OFF  # optimistic
 
