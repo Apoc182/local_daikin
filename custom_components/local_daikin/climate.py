@@ -633,10 +633,8 @@ class LocalDaikin(ClimateEntity):
         if feature not in FEATURE_MAP:
             raise Exception(f"Unknown feature {feature}")
 
+        # Always send: the cache may be stale and the write is idempotent.
         state = "on" if on else "off"
-        if self._features[feature] == state:
-            return  # no-op: nothing to send, no state change
-
         to, path, pn = FEATURE_MAP[feature]
         attributes = [
             DaikinAttribute(pn, "01" if on else "00", path, to)

@@ -158,12 +158,15 @@ def test_no_exclusion_write_when_cached_state_unknown():
     assert leaves == [("p_44", "01")]
 
 
-def test_set_feature_noop_when_already_in_that_state():
+def test_set_feature_sends_even_when_cache_matches():
+    """The cache can be up to a poll interval stale (e.g. Powerful timed out
+    on the unit), so a matching cached state must not swallow the command."""
     entity = LocalDaikin(IP)
-    entity._features["comfort"] = "on"
+    entity._features["powerful"] = "on"
     with patch(POST_PATH, _accepted_post()) as post:
-        entity.set_feature("comfort", True)
-    post.assert_not_called()
+        entity.set_feature("powerful", True)
+        leaves = _leaves(post.call_args.kwargs["json"])
+    assert leaves == [("p_44", "01")]
 
 
 class _FakeHass:
