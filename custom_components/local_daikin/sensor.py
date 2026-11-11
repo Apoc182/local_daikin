@@ -124,7 +124,9 @@ class DaikinTargetTempSensor(BaseDaikinSensor):
 
 class DaikinPostOffDryingEndSensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
-        super().__init__(hass, entry_id, ip, "Post-off Drying End", "post_off_drying_end")
+        super().__init__(
+            hass, entry_id, ip, "Post-off Drying End", "post_off_drying_end"
+        )
         self._attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def _read_state(self, entity):
