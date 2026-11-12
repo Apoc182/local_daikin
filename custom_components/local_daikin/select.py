@@ -5,6 +5,8 @@ from datetime import timedelta
 import logging
 import asyncio
 
+from .climate import async_follow_climate
+
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -23,11 +25,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
         return
 
     _LOGGER.info("Setting up Daikin select entities for %s", ip)
-    async_add_entities([
+    entities = [
         DaikinFanSpeedSelect(hass, entry.entry_id, ip),
         DaikinSwingModeSelect(hass, entry.entry_id, ip),
         DaikinHvacModeSelect(hass, entry.entry_id, ip),
-    ])
+    ]
+    async_add_entities(entities)
+    async_follow_climate(hass, entry, entities)
 
 class BaseDaikinSelect(SelectEntity):
     def __init__(self, hass, entry_id, ip, name_suffix, unique_id_suffix):

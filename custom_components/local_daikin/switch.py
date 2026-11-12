@@ -5,7 +5,7 @@ from homeassistant.components.climate.const import HVACMode
 from datetime import timedelta
 from time import monotonic
 
-from .climate import async_setup_feature_entities
+from .climate import async_follow_climate, async_setup_feature_entities
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=60)
@@ -13,10 +13,12 @@ SCAN_INTERVAL = timedelta(seconds=60)
 async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]
     _LOGGER.info("Setting up Daikin switches for %s", ip)
-    async_add_entities([
+    entities = [
         DaikinPowerSwitch(hass, entry.entry_id, ip),
         DaikinQuietFanSwitch(hass, entry.entry_id, ip),
-    ])
+    ]
+    async_add_entities(entities)
+    async_follow_climate(hass, entry, entities)
 
     def build(access):
         """One switch per feature this unit accepts writes for."""

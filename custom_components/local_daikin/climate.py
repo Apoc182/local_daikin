@@ -141,6 +141,7 @@ COMFORT_LOUVER_VALUE = 0x17
 COMFORT_LOUVER_ON = "17000000"
 COMFORT_LOUVER_OFF = "00000000"
 FEATURE_ACCESS_SIGNAL = "local_daikin_feature_access_{ip}"
+CLIMATE_UPDATED_SIGNAL = "local_daikin_climate_updated_{ip}"
 
 
 def louver_allows(leaf: dict, value: int) -> bool:
@@ -150,6 +151,24 @@ def louver_allows(leaf: dict, value: int) -> bool:
     except (KeyError, TypeError, ValueError):
         return False
     return bool(mask >> value & 1)
+
+
+@callback
+def async_follow_climate(hass, entry, entities) -> None:
+    """Refresh side entities right after each climate poll.
+
+    They read the climate entity's cache; on their own timer they could read it
+    just before a poll and lag a whole interval behind the unit.
+    """
+
+    @callback
+    def _refresh() -> None:
+        for entity in entities:
+            if entity.hass is not None:
+                entity.async_schedule_update_ha_state(True)
+
+    signal = CLIMATE_UPDATED_SIGNAL.format(ip=entry.data["ip_address"])
+    entry.async_on_unload(async_dispatcher_connect(hass, signal, _refresh))
 
 
 @callback
@@ -169,7 +188,9 @@ def async_setup_feature_entities(hass, entry, async_add_entities, build) -> None
         if added or climate is None or climate._feature_access is None:
             return
         added = True
-        async_add_entities(build(climate._feature_access))
+        entities = build(climate._feature_access)
+        async_add_entities(entities)
+        async_follow_climate(hass, entry, entities)
 
     signal = FEATURE_ACCESS_SIGNAL.format(ip=entry.data["ip_address"])
     entry.async_on_unload(async_dispatcher_connect(hass, signal, _add))
@@ -935,6 +956,14 @@ class LocalDaikin(ClimateEntity):
 
 
     def update(self):
+        """Fetch new state data, then let the side entities re-read the cache."""
+        try:
+            self._poll()
+        finally:
+            if self.hass is not None:
+                dispatcher_send(self.hass, CLIMATE_UPDATED_SIGNAL.format(ip=self._ip))
+
+    def _poll(self):
         """Fetch new state data for the entity."""
         payload = {
             "requests": [

@@ -4,13 +4,15 @@ from homeassistant.const import UnitOfTemperature, PERCENTAGE, UnitOfTime, UnitO
 from homeassistant.helpers.device_registry import DeviceInfo
 import logging
 
+from .climate import async_follow_climate
+
 _LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]
-    async_add_entities([
+    entities = [
         DaikinOutdoorTempSensor(hass, entry.entry_id, ip),
         DaikinEnergyTodaySensor(hass, entry.entry_id, ip),
         DaikinCurrentHumiditySensor(hass, entry.entry_id, ip),
@@ -18,7 +20,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
         DaikinRuntimeTodaySensor(hass, entry.entry_id, ip),
         DaikinTargetTempSensor(hass, entry.entry_id, ip),
         DaikinPostOffDryingEndSensor(hass, entry.entry_id, ip),
-    ])
+    ]
+    async_add_entities(entities)
+    async_follow_climate(hass, entry, entities)
 
 
 class BaseDaikinSensor(SensorEntity):
