@@ -93,6 +93,11 @@ Limitations and risks:
   cooling before a remote off did not start it; the real threshold is
   unknown. After a short run switched off with the remote, neither the unit
   nor this integration dries.
+- After a drying cycle the unit is switched off while still in fan-only mode,
+  and it remembers that mode. Turning it on with a power-only command (the
+  Home Assistant Power switch; the Daikin app was not tested) starts it in
+  fan-only mode, not in the mode it had before. Select the mode from the climate
+  entity (or use the remote) to start cooling again.
 - If Home Assistant is down or unreachable across the end time, the
   integration files are deleted without removing the entry, or a storage write
   fails, the unit keeps blowing until you switch it off.
