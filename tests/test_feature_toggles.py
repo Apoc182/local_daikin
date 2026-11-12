@@ -175,11 +175,11 @@ class _FakeHass:
     def __init__(self, climate):
         self.data = {"local_daikin": {"entry-1": {"climate_entity": climate}}}
 
-    def async_create_task(self, *args, **kwargs):
-        return None
+    def async_create_task(self, target, *args, **kwargs):
+        target.close()  # never run: avoids "coroutine was never awaited"
 
-    def create_task(self, *args, **kwargs):
-        return None
+    def create_task(self, target, *args, **kwargs):
+        target.close()
 
 
 def _fake_hass(climate):
