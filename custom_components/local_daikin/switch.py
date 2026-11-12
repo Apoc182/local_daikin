@@ -5,27 +5,31 @@ from homeassistant.components.climate.const import HVACMode
 from datetime import timedelta
 from time import monotonic
 
+from .climate import async_setup_feature_entities
+
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=60)
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    _LOGGER.info("Setting up Daikin switches for %s", entry.data["ip_address"])
-    features = [
-        cls(hass, entry.entry_id, entry.data["ip_address"])
-        for cls in (
-            DaikinComfortSwitch,
-            DaikinEconoSwitch,
-            DaikinOutdoorQuietSwitch,
-            DaikinPowerfulSwitch,
-        )
-    ]
-    for feature_switch in features:
-        feature_switch._group = features
+    ip = entry.data["ip_address"]
+    _LOGGER.info("Setting up Daikin switches for %s", ip)
     async_add_entities([
-        DaikinPowerSwitch(hass, entry.entry_id, entry.data["ip_address"]),
-        DaikinQuietFanSwitch(hass, entry.entry_id, entry.data["ip_address"]),
-        *features,
+        DaikinPowerSwitch(hass, entry.entry_id, ip),
+        DaikinQuietFanSwitch(hass, entry.entry_id, ip),
     ])
+
+    def build(access):
+        """One switch per feature this unit accepts writes for."""
+        switches = [
+            cls(hass, entry.entry_id, ip)
+            for cls in FEATURE_SWITCHES
+            if access.get(cls.feature) in ("write", "louver")
+        ]
+        for feature_switch in switches:
+            feature_switch._group = switches
+        return switches
+
+    async_setup_feature_entities(hass, entry, async_add_entities, build)
 
 
 class DaikinPowerSwitch(SwitchEntity):
@@ -96,8 +100,8 @@ class DaikinPowerSwitch(SwitchEntity):
 class DaikinFeatureSwitch(SwitchEntity):
     """Base switch for a climate feature toggle (comfort, econo, ...).
 
-    Reads the cached feature state from the climate entity. A feature the
-    model does not expose stays unknown (is_on is None) instead of a fake off.
+    Reads the cached feature state from the climate entity. Created only for
+    features the unit accepts writes for; read-only ones are binary sensors.
     """
 
     feature = None
@@ -193,6 +197,14 @@ class DaikinPowerfulSwitch(DaikinFeatureSwitch):
     feature = "powerful"
     name_suffix = "Powerful"
     unique_id_suffix = "powerful"
+
+
+FEATURE_SWITCHES = (
+    DaikinComfortSwitch,
+    DaikinEconoSwitch,
+    DaikinOutdoorQuietSwitch,
+    DaikinPowerfulSwitch,
+)
 
 
 class DaikinQuietFanSwitch(SwitchEntity):

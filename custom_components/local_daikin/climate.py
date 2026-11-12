@@ -10,7 +10,14 @@ from homeassistant.components.climate.const import (
     SWING_HORIZONTAL
 )
 from homeassistant.const import UnitOfTemperature
+from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+    dispatcher_send,
+)
 from typing import Any, List
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -127,6 +134,47 @@ FEATURE_MAP = {
 }
 FEATURE_EXCLUSIVE_TRIO = ("comfort", "econo", "outdoor_quiet")
 
+# Leaf "pt" in a ?filter=pv,pt,md read: 2 = writable setting, 3 = read-only status.
+LEAF_PT_WRITABLE = 2
+# Comfort Airflow as a vertical louver position (allowed per md.mx bitmask).
+COMFORT_LOUVER_VALUE = 0x17
+COMFORT_LOUVER_ON = "17000000"
+COMFORT_LOUVER_OFF = "00000000"
+FEATURE_ACCESS_SIGNAL = "local_daikin_feature_access_{ip}"
+
+
+def louver_allows(leaf: dict, value: int) -> bool:
+    """md.mx of a louver leaf is a little-endian bitmask of allowed values."""
+    try:
+        mask = int.from_bytes(bytes.fromhex(leaf["md"]["mx"]), "little")
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(mask >> value & 1)
+
+
+@callback
+def async_setup_feature_entities(hass, entry, async_add_entities, build) -> None:
+    """Add feature entities once, as soon as the unit's capabilities are known.
+
+    They are known after the climate entity's first successful poll, which may
+    come after platform setup (unit unreachable at startup).
+    """
+    added = False
+
+    @callback
+    def _add() -> None:
+        nonlocal added
+        data = hass.data.get("local_daikin", {}).get(entry.entry_id, {})
+        climate = data.get("climate_entity")
+        if added or climate is None or climate._feature_access is None:
+            return
+        added = True
+        async_add_entities(build(climate._feature_access))
+
+    signal = FEATURE_ACCESS_SIGNAL.format(ip=entry.data["ip_address"])
+    entry.async_on_unload(async_dispatcher_connect(hass, signal, _add))
+    _add()
+
 @dataclass
 class DaikinRequest:
     attributes: list[DaikinAttribute] = field(default_factory=list)
@@ -210,6 +258,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Register entity for use by switch.py / select.py / sensor.py
     hass.data["local_daikin"][entry.entry_id]["climate_entity"] = entity
+    async_dispatcher_send(hass, FEATURE_ACCESS_SIGNAL.format(ip=ip))
 
     async_add_entities([entity])
 
@@ -256,6 +305,11 @@ class LocalDaikin(ClimateEntity):
         self._energy_today = None
         # "on" / "off" / None (not exposed by this model)
         self._features = {feature: None for feature in FEATURE_MAP}
+        # feature -> "write" (own leaf), "louver" (comfort via the vertical
+        # louver), "read" (read-only), or None (absent); None until polled.
+        self._feature_access = None
+        # Modes whose vertical louver leaf can be set to the comfort position.
+        self._comfort_louver_modes = set()
         # monotonic() when the last successful poll started; None before one.
         self._polled_at = None
         self._mac = None
@@ -625,44 +679,62 @@ class LocalDaikin(ClimateEntity):
             self._fan_mode = HAFanMode.FAN_AUTO  # optimistic
 
     def set_feature(self, feature: str, on: bool) -> None:
-        """Turn a feature toggle on or off, enforcing hardware exclusivity.
+        """Turn a feature on or off, if this unit accepts writes for it.
 
         Powerful and {comfort, econo, outdoor_quiet} cannot be active at the
-        same time: enabling one side clears the active members of the other,
-        mirroring the remote's last-button-pressed-wins behaviour. Members
-        whose cached state is unknown are left untouched.
+        same time: turning one side on also clears the writable members of
+        the other side (last button pressed wins, like the remote). Each
+        write is its own request, so a rejected clear never fails the
+        accepted primary write.
         """
-        if feature not in FEATURE_MAP:
-            raise Exception(f"Unknown feature {feature}")
+        access = (self._feature_access or {}).get(feature)
+        if access == "louver":
+            if self._hvac_mode not in self._comfort_louver_modes:
+                raise HomeAssistantError(
+                    f"Comfort Airflow is not available in {self._hvac_mode.value} mode"
+                )
+            attr = HVAC_MODE_TO_SWING_ATTR_NAMES[self._hvac_mode][0]
+            value = COMFORT_LOUVER_ON if on else COMFORT_LOUVER_OFF
+            attribute = DaikinAttribute(
+                attr, value, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"
+            )
+        elif access == "write":
+            to, path, pn = FEATURE_MAP[feature]
+            attribute = DaikinAttribute(pn, "01" if on else "00", path, to)
+        else:
+            raise HomeAssistantError(f"{feature} cannot be set on this unit")
 
         # Always send: the cache may be stale and the write is idempotent.
-        state = "on" if on else "off"
-        to, path, pn = FEATURE_MAP[feature]
-        attributes = [
-            DaikinAttribute(pn, "01" if on else "00", path, to)
-        ]
+        # Update the cache only after the unit accepted the write.
+        self._send_attribute(DaikinRequest([attribute]).serialize())
+        self._features[feature] = "on" if on else "off"
 
-        # Collect exclusions to send in the same request.
-        if feature == "powerful" and on:
+        if not on:
+            return
+        if feature == "powerful":
             exclusives = FEATURE_EXCLUSIVE_TRIO
-        elif feature in FEATURE_EXCLUSIVE_TRIO and on:
+        elif feature in FEATURE_EXCLUSIVE_TRIO:
             exclusives = ("powerful",)
         else:
             exclusives = ()
-
-        # Clear every exposed member, not only cached "on": the cache may be
-        # stale. Unexposed (None) members are skipped to avoid a rejection.
-        cleared = [e for e in exclusives if self._features[e] is not None]
-        for exclusive in cleared:
+        # Clear every writable member, not only cached "on": the cache may be
+        # stale. Read-only and absent leaves are never written.
+        for exclusive in exclusives:
+            if self._feature_access.get(exclusive) != "write":
+                continue
             excl_to, excl_path, excl_pn = FEATURE_MAP[exclusive]
-            attributes.append(
-                DaikinAttribute(excl_pn, "00", excl_path, excl_to)
-            )
-
-        # Update the cache only after the unit accepted the write.
-        self._send_attribute(DaikinRequest(attributes).serialize())
-        self._features[feature] = state
-        for exclusive in cleared:
+            try:
+                self._send_attribute(
+                    DaikinRequest(
+                        [DaikinAttribute(excl_pn, "00", excl_path, excl_to)]
+                    ).serialize()
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Daikin %s: could not clear %s after enabling %s (%s)",
+                    self._ip, exclusive, feature, err,
+                )
+                continue
             self._features[exclusive] = "off"
 
 
@@ -743,6 +815,22 @@ class LocalDaikin(ClimateEntity):
             return LocalDaikin.find_value_by_pn(data, fr, *keys)
         except Exception:
             return None
+
+    @staticmethod
+    def find_leaf_or_none(data: dict, fr: str, *keys) -> dict | None:
+        """Return the whole leaf node (pv, pt, md), or None when absent."""
+        # A resource answered with an error code carries no "pc".
+        nodes = [
+            x["pc"] for x in data.get("responses", [])
+            if x.get("fr") == fr and "pc" in x
+        ]
+        node = None
+        for key in keys:
+            node = next((n for n in nodes if n.get("pn") == key), None)
+            if node is None:
+                return None
+            nodes = node.get("pch", [])
+        return node
 
     @staticmethod
     def parse_timer_minutes(raw: str | None) -> int | None:
@@ -1023,9 +1111,32 @@ class LocalDaikin(ClimateEntity):
             if runtime_today is not None:
                 self._runtime_today = runtime_today
 
+            self._comfort_louver_modes = {
+                mode
+                for mode, (vertical, _) in HVAC_MODE_TO_SWING_ATTR_NAMES.items()
+                if (
+                    leaf := self.find_leaf_or_none(
+                        data, "/dsiot/edge/adr_0100.dgc_status",
+                        "dgc_status", "e_1002", "e_3001", vertical,
+                    )
+                )
+                and leaf.get("pt") == LEAF_PT_WRITABLE
+                and louver_allows(leaf, COMFORT_LOUVER_VALUE)
+            }
+            first_access = self._feature_access is None
+            access = {}
             for feature, (to, path, pn) in FEATURE_MAP.items():
                 # Optional per model: absence is normal, so do not log it.
-                raw = self.find_value_or_none(data, to, "dgc_status", *path, pn)
+                leaf = self.find_leaf_or_none(data, to, "dgc_status", *path, pn)
+                raw = leaf.get("pv") if leaf else None
+                if leaf is None:
+                    access[feature] = None
+                elif leaf.get("pt") == LEAF_PT_WRITABLE:
+                    access[feature] = "write"
+                elif feature == "comfort" and self._comfort_louver_modes:
+                    access[feature] = "louver"
+                else:
+                    access[feature] = "read"
                 # Anything but 00/01 reads as unknown, so a stale "on" cannot stick.
                 self._features[feature] = {"01": "on", "00": "off"}.get(raw)
                 if raw not in (None, "00", "01"):
@@ -1035,6 +1146,10 @@ class LocalDaikin(ClimateEntity):
                         feature,
                         raw,
                     )
+            self._feature_access = access
+            if first_access and self.hass is not None:
+                # Lets platforms add feature entities missed at setup.
+                dispatcher_send(self.hass, FEATURE_ACCESS_SIGNAL.format(ip=self._ip))
 
             # The state machine never raises: it catches its own command rejections and
             # retries on the next poll, so a failed command does not take a

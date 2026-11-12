@@ -65,6 +65,19 @@ def _entity_with_features(response: dict):
     return entity
 
 
+def _writable() -> LocalDaikin:
+    """A unit whose four feature leaves are all writable (pt=2), like the
+    BRP069C4x/Alira units pydaikin verified."""
+    entity = LocalDaikin(IP)
+    entity._feature_access = dict.fromkeys(FEATURE_MAP, "write")
+    return entity
+
+
+def _sent(post) -> list[list[tuple[str, str]]]:
+    """Leaves of each request sent, one list per request."""
+    return [_leaves(c.kwargs["json"]) for c in post.call_args_list]
+
+
 def _accepted_post() -> dict:
     """A requests.post mock whose response carries a successful rsc."""
     from unittest.mock import MagicMock
@@ -102,10 +115,10 @@ def test_outdoor_feature_reads_from_outdoor_resource():
 
 
 def test_set_feature_sends_correct_attribute():
-    entity = LocalDaikin(IP)
+    entity = _writable()
     with patch(POST_PATH, _accepted_post()) as post:
         entity.set_feature("comfort", True)
-        payload = post.call_args.kwargs["json"]
+        payload = post.call_args_list[0].kwargs["json"]
     assert len(payload["requests"]) == 1
     request = payload["requests"][0]
     assert request["to"] == INDOOR
@@ -117,7 +130,7 @@ def test_set_feature_sends_correct_attribute():
 
 
 def test_set_feature_off_sends_zero():
-    entity = LocalDaikin(IP)
+    entity = _writable()
     with patch(POST_PATH, _accepted_post()) as post:
         entity.set_feature("econo", False)
         leaves = _leaves(post.call_args.kwargs["json"])
@@ -125,12 +138,12 @@ def test_set_feature_off_sends_zero():
 
 
 def test_enabling_comfort_disables_active_powerful():
-    entity = LocalDaikin(IP)
+    """The clear is a request of its own, after the accepted primary write."""
+    entity = _writable()
     entity._features["powerful"] = "on"
     with patch(POST_PATH, _accepted_post()) as post:
         entity.set_feature("comfort", True)
-        leaves = _leaves(post.call_args.kwargs["json"])
-    assert leaves == [("p_1D", "01"), ("p_44", "00")]
+    assert _sent(post) == [[("p_1D", "01")], [("p_44", "00")]]
     assert entity.extra_state_attributes["comfort"] == "on"
     assert entity.extra_state_attributes["powerful"] == "off"
 
@@ -138,37 +151,37 @@ def test_enabling_comfort_disables_active_powerful():
 def test_enabling_powerful_disables_every_exposed_trio_member():
     """A cached "off" may be stale (e.g. turned on by the remote since the
     last poll), so every exposed member is cleared, not only cached "on"."""
-    entity = LocalDaikin(IP)
+    entity = _writable()
     entity._features["comfort"] = "on"
     entity._features["econo"] = "on"
     entity._features["outdoor_quiet"] = "off"
     with patch(POST_PATH, _accepted_post()) as post:
         entity.set_feature("powerful", True)
-        leaves = _leaves(post.call_args.kwargs["json"])
-    assert sorted(leaves) == sorted(
-        [("p_44", "01"), ("p_1D", "00"), ("p_24", "00"), ("p_3D", "00")]
-    )
+    assert _sent(post) == [
+        [("p_44", "01")], [("p_1D", "00")], [("p_24", "00")], [("p_3D", "00")]
+    ]
     assert entity.extra_state_attributes["outdoor_quiet"] == "off"
 
 
-def test_no_exclusion_write_when_cached_state_unknown():
-    entity = LocalDaikin(IP)
-    # _features left empty (fresh entity, unit not polled yet)
+def test_no_exclusion_write_to_read_only_or_absent_leaves():
+    """Read-only (pt=3) and absent leaves are never written."""
+    entity = _writable()
+    entity._feature_access.update(
+        comfort="read", econo=None, outdoor_quiet="louver"
+    )
     with patch(POST_PATH, _accepted_post()) as post:
         entity.set_feature("powerful", True)
-        leaves = _leaves(post.call_args.kwargs["json"])
-    assert leaves == [("p_44", "01")]
+    assert _sent(post) == [[("p_44", "01")]]
 
 
 def test_set_feature_sends_even_when_cache_matches():
     """The cache can be up to a poll interval stale (e.g. Powerful timed out
     on the unit), so a matching cached state must not swallow the command."""
-    entity = LocalDaikin(IP)
+    entity = _writable()
     entity._features["powerful"] = "on"
     with patch(POST_PATH, _accepted_post()) as post:
         entity.set_feature("powerful", True)
-        leaves = _leaves(post.call_args.kwargs["json"])
-    assert leaves == [("p_44", "01")]
+    assert _sent(post)[0] == [("p_44", "01")]
 
 
 class _FakeHass:
@@ -186,9 +199,21 @@ def _fake_hass(climate):
     return _FakeHass(climate)
 
 
+def _entry(hass, climate):
+    """A config entry whose climate entity is registered, as after setup."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(domain="local_daikin", data={"ip_address": IP})
+    entry.add_to_hass(hass)
+    hass.data.setdefault("local_daikin", {})[entry.entry_id] = {
+        "climate_entity": climate
+    }
+    return entry
+
+
 
 def test_switch_tracks_feature_state():
-    climate = LocalDaikin(IP)
+    climate = _writable()
     climate._features["comfort"] = "on"
     switch = DaikinComfortSwitch(_fake_hass(climate), "entry-1", IP)
     switch.update()
@@ -197,7 +222,7 @@ def test_switch_tracks_feature_state():
 
 def test_switch_unknown_feature_is_none():
     """A feature the model does not expose shows as unknown, not a fake off."""
-    climate = LocalDaikin(IP)
+    climate = _writable()
     climate._features["comfort"] = None
     switch = DaikinComfortSwitch(_fake_hass(climate), "entry-1", IP)
     switch.update()
@@ -205,18 +230,17 @@ def test_switch_unknown_feature_is_none():
 
 
 def test_switch_turn_on_sends_command():
-    climate = LocalDaikin(IP)
+    climate = _writable()
     switch = DaikinEconoSwitch(_fake_hass(climate), "entry-1", IP)
     switch.hass = _fake_hass(climate)
     with patch(POST_PATH, _accepted_post()) as post:
         switch.turn_on()
-        leaves = _leaves(post.call_args.kwargs["json"])
-    assert leaves == [("p_24", "01")]
+    assert _sent(post)[0] == [("p_24", "01")]
     assert switch.is_on is True
 
 
 def test_switch_turn_off_sends_command():
-    climate = LocalDaikin(IP)
+    climate = _writable()
     switch = DaikinPowerfulSwitch(_fake_hass(climate), "entry-1", IP)
     switch.hass = _fake_hass(climate)
     with patch(POST_PATH, _accepted_post()) as post:
@@ -227,7 +251,7 @@ def test_switch_turn_off_sends_command():
 
 
 def test_switch_available_follows_climate():
-    climate = LocalDaikin(IP)
+    climate = _writable()
     climate._available = False
     switch = DaikinOutdoorQuietSwitch(_fake_hass(climate), "entry-1", IP)
     assert switch.available is False
@@ -247,7 +271,7 @@ def test_rejected_write_keeps_cached_state():
     """A rejected write must not leave a fake "on" in the cache."""
     import pytest
 
-    entity = LocalDaikin(IP)
+    entity = _writable()
     with patch(POST_PATH, _rejected_post()), pytest.raises(Exception, match="occured"):
         entity.set_feature("comfort", True)
     assert entity.extra_state_attributes["comfort"] is None
@@ -257,7 +281,7 @@ def test_rejected_write_keeps_exclusive_state():
     """A rejected write must not mark the opposite side as cleared."""
     import pytest
 
-    entity = LocalDaikin(IP)
+    entity = _writable()
     entity._features["powerful"] = "on"
     with patch(POST_PATH, _rejected_post()), pytest.raises(Exception, match="occured"):
         entity.set_feature("econo", True)
@@ -283,18 +307,16 @@ def test_missing_feature_nodes_do_not_log_warnings(caplog):
     assert noisy == []
 
 
-async def test_turning_on_feature_refreshes_exclusive_switches():
+async def test_turning_on_feature_refreshes_exclusive_switches(hass):
     """Enabling Econo clears Powerful on the unit; the Powerful switch must
     refresh right away instead of showing On until the next poll."""
-    from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from custom_components.local_daikin import switch as switch_module
 
-    climate = LocalDaikin(IP)
+    climate = _writable()
     climate._features["powerful"] = "on"
-    hass = _fake_hass(climate)
-    entry = SimpleNamespace(entry_id="entry-1", data={"ip_address": IP})
+    entry = _entry(hass, climate)
     added = []
     await switch_module.async_setup_entry(hass, entry, added.extend)
     by_type = {type(e): e for e in added}
@@ -303,29 +325,41 @@ async def test_turning_on_feature_refreshes_exclusive_switches():
         entity.schedule_update_ha_state = MagicMock()
 
     with patch(POST_PATH, _accepted_post()):
-        by_type[DaikinEconoSwitch].turn_on()
+        await hass.async_add_executor_job(by_type[DaikinEconoSwitch].turn_on)
 
     by_type[DaikinPowerfulSwitch].schedule_update_ha_state.assert_called_once_with(
         force_refresh=True
     )
 
 
-def test_partially_rejected_write_keeps_cached_state():
-    """Econo (indoor) + clearing Powerful (outdoor) spans two resources and
-    gets two responses; a rejection in the second one must still count."""
+def test_rejected_clear_does_not_fail_the_accepted_write():
+    """On the real unit the Powerful clear was rejected (4000) while the
+    Comfort write was accepted; the accepted write must still count."""
+    from unittest.mock import MagicMock
+
+    entity = _writable()
+    entity._features["powerful"] = "on"
+    post = MagicMock()
+    post.return_value.json.side_effect = [ACCEPTED_RESPONSE, REJECTED_RESPONSE]
+    with patch(POST_PATH, post):
+        entity.set_feature("econo", True)
+    assert entity.extra_state_attributes["econo"] == "on"
+    assert entity.extra_state_attributes["powerful"] == "on"
+
+
+def test_multi_response_rejection_still_counts():
+    """_send_attribute: any rejected response fails the request."""
     from unittest.mock import MagicMock
 
     import pytest
 
-    entity = LocalDaikin(IP)
-    entity._features["powerful"] = "on"
+    entity = _writable()
     post = MagicMock()
     post.return_value.json.return_value = {
         "responses": [{"rsc": 2004}, {"rsc": 4000}]
     }
     with patch(POST_PATH, post), pytest.raises(Exception, match="occured"):
         entity.set_feature("econo", True)
-    assert entity.extra_state_attributes["powerful"] == "on"
     assert entity.extra_state_attributes["econo"] is None
 
 
@@ -358,7 +392,7 @@ def test_empty_responses_count_as_rejected():
 
     import pytest
 
-    entity = LocalDaikin(IP)
+    entity = _writable()
     post = MagicMock()
     post.return_value.json.return_value = {"responses": []}
     with patch(POST_PATH, post), pytest.raises(Exception, match="occured"):
@@ -371,7 +405,7 @@ def test_feature_switch_refreshes_climate_entity_state():
     update right after a write, not on the next climate poll."""
     from unittest.mock import MagicMock
 
-    climate = LocalDaikin(IP)
+    climate = _writable()
     climate.hass = _fake_hass(climate)  # added to HA, as in production
     climate.schedule_update_ha_state = MagicMock()
     switch = DaikinEconoSwitch(_fake_hass(climate), "entry-1", IP)

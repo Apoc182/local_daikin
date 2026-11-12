@@ -43,7 +43,8 @@ results.
 
 - Full climate control (temperature, HVAC mode, fan, swing)
 - Extra entities:
-  - Switches: Power, Quiet Fan, Swing Mode, Comfort Airflow, Econo, Outdoor Unit Quiet, Powerful
+  - Switches: Power, Quiet Fan, Swing Mode
+  - Comfort Airflow, Econo, Outdoor Unit Quiet, Powerful: switch or binary sensor, depending on the model (see below)
   - Select: HVAC Mode Fan Speed, Swing Mode
 
   - Sensors: Outdoor temperature, energy today, runtime today indoor temp, humidity
@@ -115,14 +116,28 @@ Limitations and risks:
 
 ### Feature switches (model-dependent)
 
-- **Comfort Airflow**, **Econo**, **Outdoor Unit Quiet** and **Powerful** are exposed as
-  switches when the unit's LAN adapter reports them. If your model does not expose
-  a feature, the switch shows as *unknown* rather than a fake off.
-- The hardware allows only one of Powerful or {Comfort Airflow, Econo, Outdoor Unit
-  Quiet} at a time, so turning one on clears the other side (last button pressed wins,
-  like the remote).
-- Powerful is cancelled by the unit after ~20 minutes on its own; the switch will
-  show as off on the next poll.
+Comfort Airflow, Econo, Outdoor Unit Quiet and Powerful are created per unit,
+from what its LAN adapter reports on the first successful poll (if the unit is
+unreachable at startup, they appear once it answers):
+
+- A feature the unit reports as settable becomes a **switch**; one it reports
+  as read-only becomes a **binary sensor** that follows the remote; one it does
+  not report gets no entity. On some models (e.g. Yokozuna V) Powerful is
+  read-only and Econo / Outdoor Unit Quiet are not reported at all.
+- **Comfort Airflow** is a switch even where the unit reports it read-only, if
+  the vertical louver accepts the comfort position: the switch then sets the
+  current mode's vertical louver (on = comfort position, off = fixed). It only
+  works in modes whose louver allows that position (on the Yokozuna V: cool,
+  heat, auto and dry; not fan-only) and not while the unit is off. The
+  swing mode controls the same louver, so changing swing ends Comfort Airflow,
+  and turning Comfort Airflow off leaves the vertical louver fixed.
+- Powerful and {Comfort Airflow, Econo, Outdoor Unit Quiet} cannot run together:
+  turning one on also turns off the other side's features that the unit lets
+  set directly (last button pressed wins, like the remote). Read-only features
+  and Comfort Airflow set through the louver are not touched; whether the unit
+  clears them itself is untested.
+- Powerful is cancelled by the unit after ~20 minutes on its own; the entity
+  shows off on the next poll.
 
 ## Notes
 - If upgrading from v0.0.5 (or earlier), you will need to delete the manual configuration in your `configuration.yaml` and reconfigure via the Home Assistant devices panel.
