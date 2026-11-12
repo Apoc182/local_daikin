@@ -3,6 +3,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.components.climate.const import HVACMode
 from datetime import timedelta
+from time import monotonic
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=60)
@@ -34,6 +35,7 @@ class DaikinPowerSwitch(SwitchEntity):
         self._ip = ip
         self._state = None
         self._attr_name = f"Daikin Power ({ip})"
+        self._commanded_at = None  # monotonic() of the last accepted command
         self._attr_unique_id = f"daikin_power_{ip}"
         self._attr_should_poll = True
 
@@ -51,6 +53,14 @@ class DaikinPowerSwitch(SwitchEntity):
         entity = self._get_climate_entity()
         if entity is None:
             return
+        # A power-only turn_on leaves the cached mode "off" (the mode the unit
+        # resumes is unknown), so keep the commanded state until a poll that
+        # started after the command has read the unit.
+        if self._commanded_at is not None and (
+            entity._polled_at is None or entity._polled_at < self._commanded_at
+        ):
+            return
+        self._commanded_at = None
         self._state = entity.hvac_mode != "off"
 
     def turn_on(self, **kwargs):
@@ -59,6 +69,7 @@ class DaikinPowerSwitch(SwitchEntity):
             return
         entity.turn_on()
         self._state = True
+        self._commanded_at = monotonic()
         self.schedule_update_ha_state(force_refresh=True)
 
     def turn_off(self, **kwargs):
@@ -67,6 +78,7 @@ class DaikinPowerSwitch(SwitchEntity):
             return
         entity.turn_off()
         self._state = False
+        self._commanded_at = monotonic()
         self.schedule_update_ha_state(force_refresh=True)
 
     @property

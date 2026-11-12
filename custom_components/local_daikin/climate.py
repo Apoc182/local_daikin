@@ -14,7 +14,7 @@ from homeassistant.helpers.device_registry import format_mac
 from typing import Any, List
 from dataclasses import dataclass, field
 from enum import StrEnum
-from time import time
+from time import monotonic, time
 
 from homeassistant.helpers.device_registry import DeviceInfo
 
@@ -256,6 +256,8 @@ class LocalDaikin(ClimateEntity):
         self._energy_today = None
         # "on" / "off" / None (not exposed by this model)
         self._features = {feature: None for feature in FEATURE_MAP}
+        # monotonic() when the last successful poll started; None before one.
+        self._polled_at = None
         self._mac = None
         self._max_temp = 30 # may need some logic to set this based on the device ID
         self._min_temp = 10
@@ -854,6 +856,7 @@ class LocalDaikin(ClimateEntity):
             ]
         }
 
+        poll_started = monotonic()
         try:
             response = requests.post(self.url, json=payload, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
@@ -1040,6 +1043,7 @@ class LocalDaikin(ClimateEntity):
 
             # Successfully parsed — mark available
             self._available = True
+            self._polled_at = poll_started
 
         except Exception as err:
             _LOGGER.warning("Daikin %s: failed to parse update response (%s)", self._ip, err)
