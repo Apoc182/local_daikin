@@ -63,7 +63,8 @@ How it works:
 
 - After a COOL or DRY operation is switched off, the integration checks the
   source the unit reports for its last operation.
-  - **IR remote**: skipped, the unit runs its own MOLD PROOF cycle.
+  - **IR remote**: skipped, the unit is expected to run its own MOLD PROOF
+    cycle (see the limitations below).
   - **Home Assistant, Daikin app, OFF TIMER, or unknown source**: the unit is
     switched to fan-only for the configured duration, then powered off. An
     OFF TIMER off is detected by the unit's off-timer having 1-2 minutes left.
@@ -87,6 +88,11 @@ How it works:
 
 Limitations and risks:
 
+- The unit's own MOLD PROOF cycle after an IR-remote off only runs after the
+  unit has operated long enough. On the owner's unit, about 4 minutes of
+  cooling before a remote off did not start it; the real threshold is
+  unknown. After a short run switched off with the remote, neither the unit
+  nor this integration dries.
 - If Home Assistant is down or unreachable across the end time, the
   integration files are deleted without removing the entry, or a storage write
   fails, the unit keeps blowing until you switch it off.
