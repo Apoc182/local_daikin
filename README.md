@@ -89,7 +89,7 @@ How it works:
 Limitations and risks:
 
 - The unit's own MOLD PROOF cycle after an IR-remote off only runs after the
-  unit has operated long enough. On the owner's unit, about 4 minutes of
+  unit has operated long enough. On the unit used for testing, about 4 minutes of
   cooling before a remote off did not start it; the real threshold is
   unknown. After a short run switched off with the remote, neither the unit
   nor this integration dries.
