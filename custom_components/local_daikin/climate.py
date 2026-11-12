@@ -459,7 +459,7 @@ class LocalDaikin(ClimateEntity):
                     self._last_on_timer_minutes is not None
                     and 1 <= self._last_on_timer_minutes <= OFF_TIMER_WINDOW_MINUTES
                 )
-                _LOGGER.info(
+                _LOGGER.debug(
                     "Daikin %s: %s off seen — post-off drying armed",
                     self._ip, self._pre_transition_mode.value,
                 )
