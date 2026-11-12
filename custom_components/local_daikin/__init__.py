@@ -1,7 +1,10 @@
 import asyncio
 import logging
 
-from .const import DOMAIN
+from homeassistant.components.climate.const import HVACMode
+
+from .const import CONF_IP_ADDRESS, DOMAIN
+from .drying_store import DryingStore
 from .scanner import (
     DaikinConnectionError,
     async_get_device_info,
@@ -45,21 +48,59 @@ async def _async_migrate_legacy_unique_id(hass, entry):
 async def async_setup(hass, config):
     return True
 
+async def _async_update_listener(hass, entry) -> None:
+    """Reload the entry so changed options take effect."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_setup_entry(hass, entry):
     await _async_migrate_legacy_unique_id(hass, entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"config": entry.data}
     await hass.config_entries.async_forward_entry_setups(
-        entry, ["climate", "switch", "sensor", "select"]
+        entry, ["climate", "switch", "sensor", "select", "binary_sensor"]
     )
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
 async def async_unload_entry(hass, entry):
     unload_ok = all(
         await asyncio.gather(*[
             hass.config_entries.async_forward_entry_unload(entry, platform)
-            for platform in ("climate", "switch", "sensor", "select")
+            for platform in ("climate", "switch", "sensor", "select", "binary_sensor")
         ])
     )
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
+
+
+async def async_remove_entry(hass, entry):
+    """Power off a unit left in a post-off drying cycle, then drop the record."""
+    from .climate import LocalDaikin  # deferred: climate imports are heavy
+
+    store = DryingStore(hass, entry.entry_id)
+    try:
+        if await store.async_load() is not None:
+            unit = LocalDaikin(entry.data[CONF_IP_ADDRESS])
+            await hass.async_add_executor_job(unit.update)
+            if not unit._available:
+                _LOGGER.warning(
+                    "Local Daikin %s was unreachable on removal and could not be "
+                    "powered off; a drying cycle may still be running",
+                    entry.data[CONF_IP_ADDRESS],
+                )
+            elif unit._hvac_mode == HVACMode.FAN_ONLY:
+                await hass.async_add_executor_job(unit._update_state, False)
+    except Exception:  # noqa: BLE001 - removal must not fail
+        _LOGGER.warning(
+            "Could not power off Local Daikin after removal; "
+            "a drying cycle may still be running",
+            exc_info=True,
+        )
+    finally:
+        try:
+            await store.async_remove()
+        except Exception:  # noqa: BLE001 - removal must not fail
+            _LOGGER.warning(
+                "Could not delete the Local Daikin drying record", exc_info=True
+            )

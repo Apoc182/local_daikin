@@ -4,20 +4,25 @@ from homeassistant.const import UnitOfTemperature, PERCENTAGE, UnitOfTime, UnitO
 from homeassistant.helpers.device_registry import DeviceInfo
 import logging
 
+from .climate import async_follow_climate
+
 _LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]
-    async_add_entities([
+    entities = [
         DaikinOutdoorTempSensor(hass, entry.entry_id, ip),
         DaikinEnergyTodaySensor(hass, entry.entry_id, ip),
         DaikinCurrentHumiditySensor(hass, entry.entry_id, ip),
         DaikinIndoorTempSensor(hass, entry.entry_id, ip),
         DaikinRuntimeTodaySensor(hass, entry.entry_id, ip),
         DaikinTargetTempSensor(hass, entry.entry_id, ip),
-    ])
+        DaikinPostOffDryingEndSensor(hass, entry.entry_id, ip),
+    ]
+    async_add_entities(entities)
+    async_follow_climate(hass, entry, entities)
 
 
 class BaseDaikinSensor(SensorEntity):
@@ -119,3 +124,14 @@ class DaikinTargetTempSensor(BaseDaikinSensor):
 
     def _read_state(self, entity):
         self._state = entity.target_temperature
+
+
+class DaikinPostOffDryingEndSensor(BaseDaikinSensor):
+    def __init__(self, hass, entry_id, ip):
+        super().__init__(
+            hass, entry_id, ip, "Post-off Drying End", "post_off_drying_end"
+        )
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def _read_state(self, entity):
+        self._state = entity.post_off_drying_end
