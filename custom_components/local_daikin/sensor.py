@@ -68,6 +68,8 @@ class DaikinOutdoorTempSensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
         super().__init__(hass, entry_id, ip, "Outside Temp", "outside_temp")
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = SensorDeviceClass.TEMPERATURE
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     def _read_state(self, entity):
         self._state = entity.extra_state_attributes.get("outside_temperature")
@@ -89,6 +91,8 @@ class DaikinCurrentHumiditySensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
         super().__init__(hass, entry_id, ip, "Current Humidity", "current_humidity")
         self._attr_native_unit_of_measurement = PERCENTAGE
+        self._attr_device_class = SensorDeviceClass.HUMIDITY
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     def _read_state(self, entity):
         self._state = entity.current_humidity
@@ -98,6 +102,8 @@ class DaikinIndoorTempSensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
         super().__init__(hass, entry_id, ip, "Indoor Temp", "indoor_temp")
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = SensorDeviceClass.TEMPERATURE
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     def _read_state(self, entity):
         self._state = entity.current_temperature
@@ -107,6 +113,7 @@ class DaikinRuntimeTodaySensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
         super().__init__(hass, entry_id, ip, "Runtime Today", "runtime_today")
         self._attr_native_unit_of_measurement = UnitOfTime.MINUTES
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
 
     def _read_state(self, entity):
         self._state = entity.extra_state_attributes.get("runtime_today")
@@ -116,6 +123,8 @@ class DaikinTargetTempSensor(BaseDaikinSensor):
     def __init__(self, hass, entry_id, ip):
         super().__init__(hass, entry_id, ip, "Target Temp", "target_temp")
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = SensorDeviceClass.TEMPERATURE
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     def _read_state(self, entity):
         self._state = entity.target_temperature
