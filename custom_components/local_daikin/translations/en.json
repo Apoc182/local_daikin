@@ -48,5 +48,17 @@
       "scan_complete": "Added {added} Daikin device(s); {skipped} were already configured.",
       "scan_partial": "Added {added} Daikin device(s), skipped {skipped}, and failed to add {failed}: {failed_ips}."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Local Daikin options",
+        "description": "Adjust how this Daikin unit behaves after it is switched off.",
+        "data": {
+          "post_off_drying": "Post-off drying (mold proof)",
+          "post_off_drying_minutes": "Drying duration (minutes)"
+        }
+      }
+    }
   }
 }

@@ -13,7 +13,15 @@ from homeassistant import config_entries
 from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY
 from homeassistant.data_entry_flow import FlowResultType, UnknownFlow
 
-from .const import CONF_IP_ADDRESS, DOMAIN
+from .const import (
+    CONF_IP_ADDRESS,
+    CONF_POST_OFF_DRYING,
+    CONF_POST_OFF_DRYING_MINUTES,
+    DOMAIN,
+    POST_OFF_DRYING_DEFAULT_MINUTES,
+    POST_OFF_DRYING_MAX_MINUTES,
+    POST_OFF_DRYING_MIN_MINUTES,
+)
 from .scanner import (
     DaikinConnectionError,
     DaikinDeviceInfo,
@@ -53,10 +61,58 @@ def _schema(default: str | None = None) -> vol.Schema:
     return vol.Schema({field: str})
 
 
+class DaikinOptionsFlow(config_entries.OptionsFlow):
+    """Handle changing per-entry options for a Local Daikin adapter.
+
+    Saving the options reloads the entry via the update listener registered
+    in async_setup_entry, so the climate entity picks up the new settings.
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show the options form."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_POST_OFF_DRYING,
+                        default=self.config_entry.options.get(
+                            CONF_POST_OFF_DRYING, False
+                        ),
+                    ): bool,
+                    vol.Required(
+                        CONF_POST_OFF_DRYING_MINUTES,
+                        default=self.config_entry.options.get(
+                            CONF_POST_OFF_DRYING_MINUTES,
+                            POST_OFF_DRYING_DEFAULT_MINUTES,
+                        ),
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=POST_OFF_DRYING_MIN_MINUTES,
+                            max=POST_OFF_DRYING_MAX_MINUTES,
+                        ),
+                    ),
+                }
+            ),
+        )
+
+
 class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle adding and reconfiguring a Daikin LAN adapter."""
 
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options flow for an entry."""
+        return DaikinOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -242,7 +298,7 @@ class DaikinConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     else:
                         self._abort_if_unique_id_mismatch(reason="wrong_device")
 
-                    return self.async_update_reload_and_abort(
+                    return self.async_update_and_abort(
                         entry,
                         unique_id=device.mac,
                         data_updates={CONF_IP_ADDRESS: ip},

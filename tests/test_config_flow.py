@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.local_daikin import _async_update_listener
 from custom_components.local_daikin.config_flow import AddEntriesResult
 from custom_components.local_daikin.const import CONF_IP_ADDRESS, DOMAIN
 from custom_components.local_daikin.scanner import (
@@ -190,6 +191,38 @@ async def test_reconfigure_verifies_same_device(hass: HomeAssistant) -> None:
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_IP_ADDRESS] == NEW_IP
     assert entry.unique_id == MAC
+
+
+async def test_reconfigure_reloads_once_without_warning(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The update listener is the only reload after an IP change."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=MAC,
+        data={CONF_IP_ADDRESS: OLD_IP},
+    )
+    entry.add_to_hass(hass)
+    entry.add_update_listener(_async_update_listener)
+    result = await start_reconfigure(hass, entry)
+
+    with (
+        patch(
+            "custom_components.local_daikin.config_flow.async_get_device_info",
+            new=AsyncMock(return_value=DaikinDeviceInfo(NEW_IP, MAC)),
+        ),
+        patch.object(
+            hass.config_entries, "async_reload", new=AsyncMock()
+        ) as reload_mock,
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_IP_ADDRESS: NEW_IP}
+        )
+        await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    reload_mock.assert_awaited_once_with(entry.entry_id)
+    assert "should use it for scheduling a reload" not in caplog.text
 
 
 async def test_reconfigure_rejects_different_device(hass: HomeAssistant) -> None:

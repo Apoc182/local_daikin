@@ -10,14 +10,33 @@ from homeassistant.components.climate.const import (
     SWING_HORIZONTAL
 )
 from homeassistant.const import UnitOfTemperature
+from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+    dispatcher_send,
+)
 from typing import Any, List
 from dataclasses import dataclass, field
 from enum import StrEnum
+from time import monotonic, time
 
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+
+from .drying_store import DryingStore
+from .const import (
+    CONF_POST_OFF_DRYING,
+    CONF_POST_OFF_DRYING_MINUTES,
+    LAST_OPE_LOCAL,
+    LAST_OPE_REMOTE,
+    OFF_TIMER_WINDOW_MINUTES,
+    POST_OFF_DRYING_DEFAULT_MINUTES,
+    POST_OFF_DRYING_START_DELAY,
+)
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -105,6 +124,78 @@ HVAC_TO_TEMP_HEX = {
 REVERSE_MODE_MAP = {v: k for k, v in MODE_MAP.items()}
 REVERSE_FAN_MODE_MAP = {v: k for k, v in FAN_MODE_MAP.items()}
 
+# Feature toggles: feature -> (resource, path nodes after dgc_status, pn).
+# Values are "00" (off) / "01" (on) at every path.
+FEATURE_MAP = {
+    "comfort": ("/dsiot/edge/adr_0100.dgc_status", ["e_1002", "e_3003"], "p_1D"),
+    "econo": ("/dsiot/edge/adr_0100.dgc_status", ["e_1002", "e_3003"], "p_24"),
+    "outdoor_quiet": ("/dsiot/edge/adr_0200.dgc_status", ["e_1003", "e_3002"], "p_3D"),
+    "powerful": ("/dsiot/edge/adr_0200.dgc_status", ["e_1003", "e_3002"], "p_44"),
+}
+FEATURE_EXCLUSIVE_TRIO = ("comfort", "econo", "outdoor_quiet")
+
+# Leaf "pt" in a ?filter=pv,pt,md read: 2 = writable setting, 3 = read-only status.
+LEAF_PT_WRITABLE = 2
+# Comfort Airflow as a vertical louver position (allowed per md.mx bitmask).
+COMFORT_LOUVER_VALUE = 0x17
+COMFORT_LOUVER_ON = "17000000"
+COMFORT_LOUVER_OFF = "00000000"
+FEATURE_ACCESS_SIGNAL = "local_daikin_feature_access_{ip}"
+CLIMATE_UPDATED_SIGNAL = "local_daikin_climate_updated_{ip}"
+
+
+def louver_allows(leaf: dict, value: int) -> bool:
+    """md.mx of a louver leaf is a little-endian bitmask of allowed values."""
+    try:
+        mask = int.from_bytes(bytes.fromhex(leaf["md"]["mx"]), "little")
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(mask >> value & 1)
+
+
+@callback
+def async_follow_climate(hass, entry, entities) -> None:
+    """Refresh side entities right after each climate poll.
+
+    They read the climate entity's cache; on their own timer they could read it
+    just before a poll and lag a whole interval behind the unit.
+    """
+
+    @callback
+    def _refresh() -> None:
+        for entity in entities:
+            if entity.hass is not None:
+                entity.async_schedule_update_ha_state(True)
+
+    signal = CLIMATE_UPDATED_SIGNAL.format(ip=entry.data["ip_address"])
+    entry.async_on_unload(async_dispatcher_connect(hass, signal, _refresh))
+
+
+@callback
+def async_setup_feature_entities(hass, entry, async_add_entities, build) -> None:
+    """Add feature entities once, as soon as the unit's capabilities are known.
+
+    They are known after the climate entity's first successful poll, which may
+    come after platform setup (unit unreachable at startup).
+    """
+    added = False
+
+    @callback
+    def _add() -> None:
+        nonlocal added
+        data = hass.data.get("local_daikin", {}).get(entry.entry_id, {})
+        climate = data.get("climate_entity")
+        if added or climate is None or climate._feature_access is None:
+            return
+        added = True
+        entities = build(climate._feature_access)
+        async_add_entities(entities)
+        async_follow_climate(hass, entry, entities)
+
+    signal = FEATURE_ACCESS_SIGNAL.format(ip=entry.data["ip_address"])
+    entry.async_on_unload(async_dispatcher_connect(hass, signal, _add))
+    _add()
+
 @dataclass
 class DaikinRequest:
     attributes: list[DaikinAttribute] = field(default_factory=list)
@@ -156,7 +247,9 @@ class DaikinRequest:
 
 async def async_setup_entry(hass, entry, async_add_entities):
     ip = entry.data["ip_address"]
-    entity = LocalDaikin(ip)
+    store = DryingStore(hass, entry.entry_id)
+    entity = LocalDaikin(ip, options=entry.options, store=store)
+    entity.restore_drying(await store.async_load())
 
     # Retry initial update with backoff — Daikin units can be slow after HA reboot
     import asyncio
@@ -186,13 +279,41 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Register entity for use by switch.py / select.py / sensor.py
     hass.data["local_daikin"][entry.entry_id]["climate_entity"] = entity
+    async_dispatcher_send(hass, FEATURE_ACCESS_SIGNAL.format(ip=ip))
 
     async_add_entities([entity])
 
 class LocalDaikin(ClimateEntity):
-    def __init__(self, ip_address: str):
+    def __init__(
+        self,
+        ip_address: str,
+        options: dict[str, Any] | None = None,
+        store: Any | None = None,
+    ):
         self._name = "Local Daikin"
         self.url = f"http://{ip_address}/dsiot/multireq"
+        options = options or {}
+        self._post_off_drying = bool(options.get(CONF_POST_OFF_DRYING, False))
+        minutes = options.get(
+            CONF_POST_OFF_DRYING_MINUTES, POST_OFF_DRYING_DEFAULT_MINUTES
+        )
+        self._drying_seconds = minutes * 60
+        self._store = store  # None = no persistence
+        # Post-off drying state machine (mold-proof workaround). Driven by the
+        # 60s poll; no timers or extra HTTP calls. The unit's own MOLD PROOF
+        # cycle does not run after a WiFi (local/app) off, but does after an IR
+        # remote off, so the trigger is the operation source the unit reports.
+        # None | "waiting" | "drying"
+        self._drying_phase: str | None = None
+        self._drying_deadline: float | None = None
+        self._drying_step_after: float = 0.0  # earliest time for the next step
+        self._drying_fan_pending: bool = False  # fan Auto still to be written
+        self._drying_restored_unconfirmed: bool = False  # restored, not yet polled
+        self._pre_transition_mode: HVACMode = HVACMode.OFF
+        self._last_on_timer_minutes: int | None = None  # off timer while last on
+        self._off_by_timer: bool = False
+        self._last_ope_type: int | None = None
+        self._off_timer_minutes: int | None = None
         self._hvac_mode = HVACMode.OFF
         self._fan_mode = HAFanMode.FAN_QUIET
         self._swing_mode = SWING_OFF
@@ -203,6 +324,15 @@ class LocalDaikin(ClimateEntity):
         self._current_humidity = None
         self._runtime_today = None
         self._energy_today = None
+        # "on" / "off" / None (not exposed by this model)
+        self._features = {feature: None for feature in FEATURE_MAP}
+        # feature -> "write" (own leaf), "louver" (comfort via the vertical
+        # louver), "read" (read-only), or None (absent); None until polled.
+        self._feature_access = None
+        # Modes whose vertical louver leaf can be set to the comfort position.
+        self._comfort_louver_modes = set()
+        # monotonic() when the last successful poll started; None before one.
+        self._polled_at = None
         self._mac = None
         self._max_temp = 30 # may need some logic to set this based on the device ID
         self._min_temp = 10
@@ -252,8 +382,9 @@ class LocalDaikin(ClimateEntity):
             self._hvac_mode = hvac_mode
 
             # Potentially add the turn on attribute here, unsure.
-            self.turn_on()
+            self._update_state(True)
             self._send_attribute(DaikinRequest([attribute]).serialize())
+            self._user_takeover()
 
 
     async def initialize_unique_id(self, hass):
@@ -323,6 +454,7 @@ class LocalDaikin(ClimateEntity):
             self._fan_mode = HAFanMode(fan_mode)  # optimistic
             mode_attr = DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
             self._send_attribute(DaikinRequest([mode_attr]).serialize())
+            self._user_takeover()
         else:
             self._fan_mode = HAFanMode.FAN_AUTO
 
@@ -341,6 +473,290 @@ class LocalDaikin(ClimateEntity):
                 ]
             ).serialize()
         )
+        self._user_takeover()
+
+
+    def _persist(self, deadline: float | None) -> bool:
+        """Record the drying deadline (None clears it); False if the store failed."""
+        if self._store is None:
+            return True
+        try:
+            self._store.save(deadline)
+        except Exception as err:
+            _LOGGER.warning("Daikin %s: could not persist drying state (%s)", self._ip, err)
+            return False
+        return True
+
+    def restore_drying(self, deadline: float | None) -> None:
+        """Resume a cycle recorded before a restart; the next poll validates it."""
+        if deadline is not None:
+            self._drying_phase = "drying"
+            self._drying_deadline = deadline
+            self._drying_restored_unconfirmed = True
+            self._drying_fan_pending = True
+            self._drying_step_after = 0.0  # the unit has long settled
+
+    @property
+    def post_off_drying_end(self) -> datetime | None:
+        # Read once: a cancel on the executor may clear it between two reads.
+        deadline = self._drying_deadline
+        if self._drying_phase != "drying" or deadline is None:
+            return None
+        return datetime.fromtimestamp(deadline, tz=UTC)
+
+    def _cancel_drying(self, reason: str) -> None:
+        _LOGGER.info("Daikin %s: post-off drying cancelled (%s)", self._ip, reason)
+        self._drying_phase = None
+        self._drying_deadline = None
+        self._drying_restored_unconfirmed = False
+        self._persist(None)
+
+    def _user_takeover(self) -> None:
+        """Hand the unit back after an accepted HA command while drying.
+
+        "waiting" is left to polling: it sees the unit come back on.
+        """
+        if self._drying_phase == "drying":
+            self._cancel_drying("changed from Home Assistant")
+
+    def _process_post_off_drying(self, now: float) -> None:
+        """Advance the post-off drying state machine on each poll.
+
+        None    -> waiting  on a COOL/DRY -> OFF transition (option on)
+        waiting -> None     unit on again, or the off came from the IR remote
+                            (the unit runs its own MOLD PROOF cycle)
+        waiting -> drying   after the start delay (last_ope has caught up):
+                            fan-only + power on, at the unit's own fan speed;
+                            or a failed start the unit applied (reads FAN_ONLY)
+        drying  -> drying   fan Auto, sent on its own after the start delay
+        drying  -> waiting  first poll after a restore finds the unit OFF and
+                            not operated by remote/app: the start never landed
+        drying  -> None     at the deadline (power off), or cancelled if the
+                            mode changed or the remote/app operated the unit
+        """
+        hvac = self._hvac_mode
+
+        if self._drying_phase is None:
+            if (
+                self._post_off_drying
+                and hvac == HVACMode.OFF
+                and self._pre_transition_mode in (HVACMode.COOL, HVACMode.DRY)
+            ):
+                self._drying_phase = "waiting"
+                self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
+                self._off_by_timer = (
+                    self._last_on_timer_minutes is not None
+                    and 1 <= self._last_on_timer_minutes <= OFF_TIMER_WINDOW_MINUTES
+                )
+                _LOGGER.debug(
+                    "Daikin %s: %s off seen — post-off drying armed",
+                    self._ip, self._pre_transition_mode.value,
+                )
+            if hvac != HVACMode.OFF:
+                self._last_on_timer_minutes = self._off_timer_minutes
+            self._pre_transition_mode = hvac
+            return
+
+        if self._drying_phase == "waiting":
+            if hvac != HVACMode.OFF:
+                if self._drying_deadline is not None:
+                    if hvac == HVACMode.FAN_ONLY:
+                        # A start failed (e.g. timed out) but the unit applied it.
+                        self._drying_phase = "drying"
+                        self._drying_fan_pending = True
+                        self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
+                        return
+                    self._cancel_drying(f"mode is {hvac.value}")
+                self._drying_phase = None
+                self._pre_transition_mode = hvac
+                self._last_on_timer_minutes = self._off_timer_minutes
+                return
+            if now < self._drying_step_after:
+                return
+            if self._last_ope_type == LAST_OPE_REMOTE and not self._off_by_timer:
+                _LOGGER.debug(
+                    "Daikin %s: remote off — built-in MOLD PROOF expected, "
+                    "post-off drying skipped",
+                    self._ip,
+                )
+                if self._drying_deadline is not None:
+                    self._cancel_drying("remote off")
+                self._drying_phase = None
+                self._pre_transition_mode = HVACMode.OFF
+                return
+            deadline = now + self._drying_seconds
+            # Save before sending: a crash after the send must not lose the record.
+            if not self._persist(deadline):
+                return
+            try:
+                self._send_attribute(
+                    DaikinRequest(
+                        [
+                            DaikinAttribute(
+                                "p_01",
+                                REVERSE_MODE_MAP[HVACMode.FAN_ONLY],
+                                ["e_1002", "e_3001"],
+                                "/dsiot/edge/adr_0100.dgc_status",
+                            ),
+                            DaikinAttribute(
+                                "p_01",
+                                "01",
+                                ["e_1002", "e_A002"],
+                                "/dsiot/edge/adr_0100.dgc_status",
+                            ),
+                        ]
+                    ).serialize()
+                )
+            except Exception as err:
+                # Stay in "waiting": the next poll retries, or adopts the cycle if
+                # the unit applied the command anyway (e.g. the reply timed out).
+                _LOGGER.warning(
+                    "Daikin %s: post-off drying start failed, retrying next poll (%s)",
+                    self._ip, err,
+                )
+                self._drying_deadline = deadline
+                return
+            self._drying_deadline = deadline
+            self._drying_phase = "drying"
+            self._drying_fan_pending = True
+            self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
+            self._hvac_mode = HVACMode.FAN_ONLY  # optimistic
+            _LOGGER.info(
+                "Daikin %s: post-off drying started (source %s), off in %d min",
+                self._ip, self._last_ope_type, self._drying_seconds // 60,
+            )
+            return
+
+        # drying
+        restored = self._drying_restored_unconfirmed
+        self._drying_restored_unconfirmed = False
+        if (
+            restored
+            and hvac == HVACMode.OFF
+            and now < self._drying_deadline
+            and self._last_ope_type in (None, LAST_OPE_LOCAL)
+        ):
+            # Recorded before a restart, but the start never landed: retry it.
+            _LOGGER.info(
+                "Daikin %s: restored drying not running — retrying start", self._ip
+            )
+            self._drying_phase = "waiting"
+            self._drying_step_after = now + POST_OFF_DRYING_START_DELAY
+            return
+
+        if hvac != HVACMode.FAN_ONLY:
+            self._cancel_drying(f"mode is {hvac.value}")
+            self._pre_transition_mode = hvac
+            if hvac != HVACMode.OFF:
+                self._last_on_timer_minutes = self._off_timer_minutes
+            return
+
+        if self._last_ope_type is not None and self._last_ope_type != LAST_OPE_LOCAL:
+            self._cancel_drying("operated from remote or app")
+            return
+
+        if now >= self._drying_deadline:
+            _LOGGER.info("Daikin %s: post-off drying finished — powering off", self._ip)
+            # A rejected power-off keeps phase="drying" so the next poll
+            # retries — the unit must not run fan-only forever.
+            try:
+                self._update_state(False)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Daikin %s: post-off drying power-off failed, retrying (%s)",
+                    self._ip, err,
+                )
+                return
+            self._drying_phase = None
+            self._drying_deadline = None
+            self._persist(None)
+            self._pre_transition_mode = HVACMode.OFF
+            self._hvac_mode = HVACMode.OFF  # optimistic
+            return
+
+        if self._drying_fan_pending and now >= self._drying_step_after:
+            # Own request after the start has settled; a local-API write keeps
+            # last_ope at 100, so it is not read as a takeover.
+            try:
+                self._send_attribute(
+                    DaikinRequest(
+                        [
+                            DaikinAttribute(
+                                HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[HVACMode.FAN_ONLY],
+                                FAN_MODE_MAP[HAFanMode.FAN_AUTO],
+                                ["e_1002", "e_3001"],
+                                "/dsiot/edge/adr_0100.dgc_status",
+                            )
+                        ]
+                    ).serialize()
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Daikin %s: post-off drying fan Auto failed, retrying (%s)",
+                    self._ip, err,
+                )
+                return
+            self._drying_fan_pending = False
+            self._fan_mode = HAFanMode.FAN_AUTO  # optimistic
+
+    def set_feature(self, feature: str, on: bool) -> None:
+        """Turn a feature on or off, if this unit accepts writes for it.
+
+        Powerful and {comfort, econo, outdoor_quiet} cannot be active at the
+        same time: turning one side on also clears the writable members of
+        the other side (last button pressed wins, like the remote). Each
+        write is its own request, so a rejected clear never fails the
+        accepted primary write.
+        """
+        access = (self._feature_access or {}).get(feature)
+        if access == "louver":
+            if self._hvac_mode not in self._comfort_louver_modes:
+                raise HomeAssistantError(
+                    f"Comfort Airflow is not available in {self._hvac_mode.value} mode"
+                )
+            attr = HVAC_MODE_TO_SWING_ATTR_NAMES[self._hvac_mode][0]
+            value = COMFORT_LOUVER_ON if on else COMFORT_LOUVER_OFF
+            attribute = DaikinAttribute(
+                attr, value, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"
+            )
+        elif access == "write":
+            to, path, pn = FEATURE_MAP[feature]
+            attribute = DaikinAttribute(pn, "01" if on else "00", path, to)
+        else:
+            raise HomeAssistantError(f"{feature} cannot be set on this unit")
+
+        # Always send: the cache may be stale and the write is idempotent.
+        # Update the cache only after the unit accepted the write.
+        self._send_attribute(DaikinRequest([attribute]).serialize())
+        self._features[feature] = "on" if on else "off"
+
+        if not on:
+            return
+        if feature == "powerful":
+            exclusives = FEATURE_EXCLUSIVE_TRIO
+        elif feature in FEATURE_EXCLUSIVE_TRIO:
+            exclusives = ("powerful",)
+        else:
+            exclusives = ()
+        # Clear every writable member, not only cached "on": the cache may be
+        # stale. Read-only and absent leaves are never written.
+        for exclusive in exclusives:
+            if self._feature_access.get(exclusive) != "write":
+                continue
+            excl_to, excl_path, excl_pn = FEATURE_MAP[exclusive]
+            try:
+                self._send_attribute(
+                    DaikinRequest(
+                        [DaikinAttribute(excl_pn, "00", excl_path, excl_to)]
+                    ).serialize()
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Daikin %s: could not clear %s after enabling %s (%s)",
+                    self._ip, exclusive, feature, err,
+                )
+                continue
+            self._features[exclusive] = "off"
 
 
     @property
@@ -383,10 +799,12 @@ class LocalDaikin(ClimateEntity):
 
     @property
     def extra_state_attributes(self):
+        features = dict(self._features)
         return {
             "outside_temperature": self._outside_temperature,
             "runtime_today": self._runtime_today,
-            "energy_today": self._energy_today
+            "energy_today": self._energy_today,
+            **features
         }
 
     @property
@@ -410,6 +828,38 @@ class LocalDaikin(ClimateEntity):
                     break
             if not found:
                 raise Exception(f'Key {current_key} not found')
+
+    @staticmethod
+    def find_value_or_none(data: dict, fr: str, *keys):
+        """Like find_value_by_pn, but returns None silently when absent."""
+        try:
+            return LocalDaikin.find_value_by_pn(data, fr, *keys)
+        except Exception:
+            return None
+
+    @staticmethod
+    def find_leaf_or_none(data: dict, fr: str, *keys) -> dict | None:
+        """Return the whole leaf node (pv, pt, md), or None when absent."""
+        # A resource answered with an error code carries no "pc".
+        nodes = [
+            x["pc"] for x in data.get("responses", [])
+            if x.get("fr") == fr and "pc" in x
+        ]
+        node = None
+        for key in keys:
+            node = next((n for n in nodes if n.get("pn") == key), None)
+            if node is None:
+                return None
+            nodes = node.get("pch", [])
+        return node
+
+    @staticmethod
+    def parse_timer_minutes(raw: str | None) -> int | None:
+        """Decode a little-endian 16-bit hex value ("4E00" -> 78)."""
+        try:
+            return int.from_bytes(bytes.fromhex(raw), "little") if raw else None
+        except (ValueError, TypeError):
+            return None
 
     @staticmethod
     def try_find_value_by_pn(data: dict, fr: str, *keys):
@@ -444,6 +894,7 @@ class LocalDaikin(ClimateEntity):
         temperature_hex = format(int(temperature * 2), '02x') 
         temp_attr = DaikinAttribute(attr_name, temperature_hex, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
         self._send_attribute(DaikinRequest([temp_attr]).serialize())
+        self._user_takeover()
 
     def _send_attribute(self, request: dict) -> None:
         """Send a command to the Daikin unit. Does NOT poll for updated state afterwards
@@ -455,11 +906,13 @@ class LocalDaikin(ClimateEntity):
             _LOGGER.error("Daikin %s: failed to send command: %s", self._ip, err)
             raise
         _LOGGER.info(response)
-        if response['responses'][0]['rsc'] != 2004:
+        # One response per target resource; every one must be accepted.
+        rscs = [r.get('rsc') for r in response['responses']]
+        if not rscs or any(rsc != 2004 for rsc in rscs):
             _LOGGER.warning(
                 "Daikin %s: command rejected (rsc=%s). request=%s response=%s",
                 self._ip,
-                response['responses'][0].get('rsc'),
+                rscs,
                 request,
                 response,
             )
@@ -473,10 +926,12 @@ class LocalDaikin(ClimateEntity):
         _LOGGER.info("Turned off")
         self._hvac_mode = HVACMode.OFF  # optimistic
         self._update_state(False)
+        self._user_takeover()
 
     def turn_on(self):
         _LOGGER.info("Turned on")
         self._update_state(True)
+        self._user_takeover()
 
     def get_swing_state(self, data: dict) -> str:
 
@@ -501,6 +956,14 @@ class LocalDaikin(ClimateEntity):
 
 
     def update(self):
+        """Fetch new state data, then let the side entities re-read the cache."""
+        try:
+            self._poll()
+        finally:
+            if self.hass is not None:
+                dispatcher_send(self.hass, CLIMATE_UPDATED_SIGNAL.format(ip=self._ip))
+
+    def _poll(self):
         """Fetch new state data for the entity."""
         payload = {
             "requests": [
@@ -510,6 +973,7 @@ class LocalDaikin(ClimateEntity):
             ]
         }
 
+        poll_started = monotonic()
         try:
             response = requests.post(self.url, json=payload, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
@@ -546,6 +1010,21 @@ class LocalDaikin(ClimateEntity):
                 self._hvac_mode = MODE_MAP[mode_raw]
             elif mode_raw is not None:
                 _LOGGER.warning("Daikin %s: unknown hvac mode code %s", self._ip, mode_raw)
+
+            ope_type = self.find_value_or_none(
+                data,
+                "/dsiot/edge/adr_0100.dgc_status",
+                "dgc_status",
+                "last_ope",
+                "type",
+            )
+            self._last_ope_type = ope_type if isinstance(ope_type, int) else None
+            self._off_timer_minutes = self.parse_timer_minutes(
+                self.find_value_or_none(
+                    data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status",
+                    "e_1002", "e_3003", "p_3B",
+                )
+            )
 
             outside_raw = self.try_find_value_by_pn(
                 data,
@@ -661,8 +1140,54 @@ class LocalDaikin(ClimateEntity):
             if runtime_today is not None:
                 self._runtime_today = runtime_today
 
+            self._comfort_louver_modes = {
+                mode
+                for mode, (vertical, _) in HVAC_MODE_TO_SWING_ATTR_NAMES.items()
+                if (
+                    leaf := self.find_leaf_or_none(
+                        data, "/dsiot/edge/adr_0100.dgc_status",
+                        "dgc_status", "e_1002", "e_3001", vertical,
+                    )
+                )
+                and leaf.get("pt") == LEAF_PT_WRITABLE
+                and louver_allows(leaf, COMFORT_LOUVER_VALUE)
+            }
+            first_access = self._feature_access is None
+            access = {}
+            for feature, (to, path, pn) in FEATURE_MAP.items():
+                # Optional per model: absence is normal, so do not log it.
+                leaf = self.find_leaf_or_none(data, to, "dgc_status", *path, pn)
+                raw = leaf.get("pv") if leaf else None
+                if leaf is None:
+                    access[feature] = None
+                elif leaf.get("pt") == LEAF_PT_WRITABLE:
+                    access[feature] = "write"
+                elif feature == "comfort" and self._comfort_louver_modes:
+                    access[feature] = "louver"
+                else:
+                    access[feature] = "read"
+                # Anything but 00/01 reads as unknown, so a stale "on" cannot stick.
+                self._features[feature] = {"01": "on", "00": "off"}.get(raw)
+                if raw not in (None, "00", "01"):
+                    _LOGGER.debug(
+                        "Daikin %s: unknown feature value for %s: %s",
+                        self._ip,
+                        feature,
+                        raw,
+                    )
+            self._feature_access = access
+            if first_access and self.hass is not None:
+                # Lets platforms add feature entities missed at setup.
+                dispatcher_send(self.hass, FEATURE_ACCESS_SIGNAL.format(ip=self._ip))
+
+            # The state machine never raises: it catches its own command rejections and
+            # retries on the next poll, so a failed command does not take a
+            # healthy, fully-parsed entity offline.
+            self._process_post_off_drying(now=time())
+
             # Successfully parsed — mark available
             self._available = True
+            self._polled_at = poll_started
 
         except Exception as err:
             _LOGGER.warning("Daikin %s: failed to parse update response (%s)", self._ip, err)
